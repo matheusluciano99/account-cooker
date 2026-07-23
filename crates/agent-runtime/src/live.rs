@@ -86,6 +86,9 @@ pub struct LiveTransferReceipt {
     pub transfer_lamports: u64,
     pub action_fee_lamports: u64,
     pub funding_fee_lamports: u64,
+    /// Lamports sent to the ephemeral fee-payer: its action fee plus the rent-exempt minimum
+    /// it must retain so the funding transaction is itself valid.
+    pub fee_payer_topup_lamports: u64,
     pub required_debit_lamports: u64,
     pub source_balance_before: u64,
     pub funding_signature: Option<String>,
@@ -170,10 +173,16 @@ pub struct RpcChain {
 }
 
 impl RpcChain {
-    /// e.g. `RpcChain::new("https://api.devnet.solana.com")`.
+    /// e.g. `RpcChain::new("https://api.devnet.solana.com")`. Uses `confirmed` commitment: it
+    /// is the right basis for blockhashes and preflight when submitting (the default
+    /// `finalized` lags ~32 slots, which stales blockhashes and can make preflight simulate
+    /// against a bank that has not yet observed a just-funded account).
     pub fn new(url: impl Into<String>) -> Self {
         RpcChain {
-            client: solana_client::rpc_client::RpcClient::new(url.into()),
+            client: solana_client::rpc_client::RpcClient::new_with_commitment(
+                url.into(),
+                CommitmentConfig::confirmed(),
+            ),
         }
     }
 
@@ -183,6 +192,14 @@ impl RpcChain {
 
     fn fee_for(&self, tx: &Transaction) -> Result<u64, DynErr> {
         Ok(self.client.get_fee_for_message(&tx.message)?)
+    }
+
+    /// Minimum balance a `data_len`-byte account must hold to be rent-exempt. A fee-payer left
+    /// below this (and non-zero) makes its funding transaction fail `InsufficientFundsForRent`.
+    fn min_rent_exempt(&self, data_len: usize) -> Result<u64, DynErr> {
+        Ok(self
+            .client
+            .get_minimum_balance_for_rent_exemption(data_len)?)
     }
 
     /// Submit one immutable transaction and retry only those exact bytes/signature. This
@@ -263,9 +280,15 @@ pub fn run_live_transfer(cfg: &LiveTransferConfig) -> Result<LiveTransferReceipt
     let quote_hash = chain.latest_blockhash()?;
     let quoted_action = build_transfer(&source, &destination, cfg.lamports, &fee_payer, quote_hash);
     let action_fee = chain.fee_for(&quoted_action)?;
-    if action_fee > cfg.max_fee_payer_topup {
+    // The fee-payer must retain the rent-exempt minimum after paying the action fee, or the
+    // funding transaction that creates it fails `InsufficientFundsForRent`. Top it up with both.
+    let rent_exempt_min = chain.min_rent_exempt(0)?;
+    let fee_payer_topup = action_fee
+        .checked_add(rent_exempt_min)
+        .ok_or_else(|| invalid_input("fee-payer top-up overflow"))?;
+    if fee_payer_topup > cfg.max_fee_payer_topup {
         return Err(invalid_input(format!(
-            "required fee-payer top-up {action_fee} exceeds limit {}",
+            "required fee-payer top-up {fee_payer_topup} exceeds limit {}",
             cfg.max_fee_payer_topup
         )));
     }
@@ -273,14 +296,14 @@ pub fn run_live_transfer(cfg: &LiveTransferConfig) -> Result<LiveTransferReceipt
     let funding_quote = build_transfer(
         &source,
         &fee_payer.pubkey(),
-        action_fee,
+        fee_payer_topup,
         &source,
         quote_hash,
     );
     let funding_fee = chain.fee_for(&funding_quote)?;
     let required_debit = cfg
         .lamports
-        .checked_add(action_fee)
+        .checked_add(fee_payer_topup)
         .and_then(|value| value.checked_add(funding_fee))
         .ok_or_else(|| invalid_input("required debit overflow"))?;
     if required_debit > cfg.max_total_debit {
@@ -305,6 +328,7 @@ pub fn run_live_transfer(cfg: &LiveTransferConfig) -> Result<LiveTransferReceipt
         transfer_lamports: cfg.lamports,
         action_fee_lamports: action_fee,
         funding_fee_lamports: funding_fee,
+        fee_payer_topup_lamports: fee_payer_topup,
         required_debit_lamports: required_debit,
         source_balance_before: source_balance,
         funding_signature: None,
@@ -318,7 +342,7 @@ pub fn run_live_transfer(cfg: &LiveTransferConfig) -> Result<LiveTransferReceipt
     let funding_tx = build_transfer(
         &source,
         &fee_payer.pubkey(),
-        action_fee,
+        fee_payer_topup,
         &source,
         funding_hash,
     );

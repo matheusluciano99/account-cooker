@@ -196,9 +196,13 @@ enum Cmd {
         destination: String,
         #[arg(long, default_value_t = 1_000)]
         lamports: u64,
-        #[arg(long, default_value_t = 100_000)]
+        /// Ceiling on the total debit from the payer. Default covers the transfer plus a
+        /// rent-exempt fee-payer top-up (~0.0009 SOL) and fees.
+        #[arg(long, default_value_t = 5_000_000)]
         max_total_debit: u64,
-        #[arg(long, default_value_t = 50_000)]
+        /// Ceiling on the ephemeral fee-payer top-up. Default covers the rent-exempt minimum
+        /// (~890_880 lamports) plus the action fee.
+        #[arg(long, default_value_t = 2_000_000)]
         max_fee_payer_topup: u64,
         #[arg(long, default_value_t = 20)]
         status_polls: u32,

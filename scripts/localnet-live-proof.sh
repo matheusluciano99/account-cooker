@@ -24,15 +24,25 @@ solana-keygen new --no-bip39-passphrase --silent --force --outfile "$payer"
 solana-keygen new --no-bip39-passphrase --silent --force --outfile "$destination_key"
 destination="$(solana-keygen pubkey "$destination_key")"
 
-solana airdrop 1 "$(solana-keygen pubkey "$payer")" --url "$rpc_url" >/dev/null
+solana airdrop 2 "$(solana-keygen pubkey "$payer")" --url "$rpc_url" >/dev/null
 
+# Wait for the airdrop to finalize (the tool reads balance at finalized commitment).
+for _ in $(seq 1 60); do
+  finalized="$(solana balance "$(solana-keygen pubkey "$payer")" --lamports \
+    --commitment finalized --url "$rpc_url" | awk '{print $1}')"
+  [[ "${finalized:-0}" -ge 2000000000 ]] && break
+  sleep 1
+done
+
+# The fee-payer top-up must cover the rent-exempt minimum (~0.0009 SOL) plus the action fee,
+# so the ceilings are set above that rather than at a bare fee.
 cargo run --quiet --features live --bin curupira -- live-transfer \
   --rpc-url "$rpc_url" \
   --payer "$payer" \
   --destination "$destination" \
   --lamports 1000000 \
-  --max-total-debit 1100000 \
-  --max-fee-payer-topup 50000 \
+  --max-total-debit 5000000 \
+  --max-fee-payer-topup 2000000 \
   --execute >"$receipt"
 
 jq -e '
@@ -48,4 +58,4 @@ if [[ "$destination_balance" -ne 1000000 ]]; then
 fi
 
 echo "live proof passed: destination=$destination balance=$destination_balance"
-jq '{funding_signature, action_signature, ephemeral_fee_payer, required_debit_lamports}' "$receipt"
+jq '{funding_signature, action_signature, ephemeral_fee_payer, fee_payer_topup_lamports, required_debit_lamports}' "$receipt"

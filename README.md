@@ -175,10 +175,15 @@ The script creates temporary keys, airdrops only on the selected local endpoint,
 one transfer, checks both signatures, verifies the destination balance, and removes the
 temporary directory. The library never airdrops and never defaults to devnet/mainnet.
 
+The same command runs against public **devnet** with `--rpc-url https://api.devnet.solana.com
+--allow-remote-rpc`; a proven run and its two finalized signatures are recorded in
+[`EVIDENCE.md`](EVIDENCE.md).
+
 Current live scope is intentionally precise: **native SOL transfer and rotated fee-payer
-funding are implemented as real Solana transactions; stake/swap/memo adapters are still
-deterministic intent planners.** They must not be described as production protocol
-integrations until corresponding instruction builders and validator tests land.
+funding are implemented as real Solana transactions, proven on localnet and devnet;
+stake/swap/memo adapters are still deterministic intent planners.** They must not be
+described as production protocol integrations until corresponding instruction builders and
+validator tests land.
 
 ## Architecture
 

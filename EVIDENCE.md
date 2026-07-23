@@ -198,20 +198,49 @@ cargo run --release --bin curupira -- benchmark \
 
 The three TOML files were exported, loaded, validated, and used successfully.
 
-## Live-path evidence boundary
+## Live-path proof (localnet and devnet)
 
-The following passed:
+Ran against a real Solana runtime with the Agave CLI (`solana-cli 4.1.1`).
+
+Localnet (`solana-test-validator`), the sanctioned self-contained proof — fresh keys,
+airdrop, execute, destination balance asserted:
 
 ```bash
-cargo check --workspace --features live
-bash -n scripts/localnet-live-proof.sh
+CURUPIRA_RPC_URL=http://127.0.0.1:8899 bash scripts/localnet-live-proof.sh
+# live proof passed: destination=43Fvyj…F6qQ balance=1000000
 ```
 
-The local machine used for this verification did not have `solana`,
-`solana-keygen`, `solana-test-validator`, or `surfpool` installed. Therefore no
-transaction signature is claimed here. The repository supplies a fail-closed live command,
-unit tests for its transaction construction and limits, and the proof script; an actual
-validator run remains a clearly stated evidence gap.
+Public **devnet**, the same fail-closed command against `https://api.devnet.solana.com`:
+
+```bash
+cargo run --features live --bin curupira -- live-transfer \
+  --rpc-url https://api.devnet.solana.com --allow-remote-rpc \
+  --payer payer.json --destination ARXm2w4EkUWdVK1H4QYpaFRq14JMxBPXNsUSB88q9w9y \
+  --lamports 1000000 --execute
+```
+
+produced two finalized transactions (verifiable on any devnet explorer):
+
+| role | signature | status |
+|---|---|---|
+| ephemeral fee-payer funding | `3MExTiJGhvjfUeCtYbhKaZQAudW8LiTaLj5FsNFcsmTHJCA4fVRvD8gzRkc1uWZPvsSC2hUJhxDCJfJrTPxUpr2A` | Finalized |
+| SOL transfer (fee paid by the funded ephemeral payer) | `5EdGWj8D3pTD2KL7d9Wz54uWhpPa46q5i8UgawRpDxB41TM8ohqxVyrHTNngYgHWAs5qczTvqHLRMkK2PNgnXcNx` | Finalized |
+
+Source `8pUY65gqx8uTXfxZte9558ntkot7y6oszw1GDHGuSfny`, ephemeral fee-payer
+`zfR4e6eRXGcx4FbeUVPCcGrvzpDPnKXZdyBawX9PSF9`, destination received exactly `1000000`
+lamports. The fee-payer top-up was `900880` lamports (rent-exempt minimum plus the action
+fee), so the funder never overpaid and the ephemeral account stayed valid.
+
+Two defects were found and fixed while producing this proof, both of which had prevented
+any successful on-chain execution:
+
+- the ephemeral fee-payer was funded with only the action fee, leaving it below the
+  rent-exempt minimum — every funding transaction failed `InsufficientFundsForRent`. It is
+  now topped up with `rent_exempt_minimum(0) + action_fee`.
+- the RPC client used the default `finalized` commitment for blockhashes and preflight,
+  which stales blockhashes (devnet: `blockhash expired`) and can simulate against a bank
+  that has not observed a just-funded account (localnet: `no record of a prior credit`).
+  Submission now uses `confirmed`.
 
 ## Regression caught during verification
 
