@@ -25,6 +25,19 @@ pub struct Report {
     /// across. 1.0 = fully de-anonymized; higher = the adversary can't tell your
     /// accounts are one entity. HIGHER = better privacy.
     pub fragmentation: f64,
+    /// Pairwise precision over owned accounts. The honesty counterweight to F1: HIGH means
+    /// the adversary's links are real, not a trivial over-merge. A privacy tool cannot brag
+    /// about a low F1 that was only achieved by the adversary collapsing everything.
+    pub attribution_precision: f64,
+    /// Fraction of within-burst owned-source pairs that are truly same-operator (pooled,
+    /// pair-weighted). A property of the LEDGER, not the clustering: it is the upper bound
+    /// on how honest any burst-based heuristic can be. 1.0 = bursts are pure (no same-second
+    /// collisions between operators); lower = the data itself caps achievable precision.
+    pub burst_purity: f64,
+    /// Largest share of owned accounts landing in any single predicted cluster. A
+    /// trivial-collapse alarm: near 1.0 means the adversary fused the whole fleet into one
+    /// blob (cheap, dishonest); small means genuinely separated inferences.
+    pub largest_cluster_frac: f64,
 }
 
 /// Score a clustering against the ledger's ground truth.
@@ -90,6 +103,49 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering) -> Report {
         ops.values().map(|s| s.len() as f64).sum::<f64>() / ops.len() as f64
     };
 
+    // Largest-cluster share over OWNED accounts — the trivial-collapse alarm.
+    let mut owned_per_cluster: HashMap<usize, usize> = HashMap::new();
+    for &acc in owner.keys() {
+        if let Some(&c) = clustering.cluster_of.get(&acc) {
+            *owned_per_cluster.entry(c).or_insert(0) += 1;
+        }
+    }
+    let largest_cluster_frac = if accounts.is_empty() {
+        0.0
+    } else {
+        owned_per_cluster.values().copied().max().unwrap_or(0) as f64 / accounts.len() as f64
+    };
+
+    // Burst purity — a property of the ledger. Uses the SAME burst definition the
+    // heuristics do (which reads only ts/slot); the `operator` peek here is legal because
+    // this is the scoring layer, not a heuristic.
+    let (mut pure_pairs, mut total_pairs) = (0u64, 0u64);
+    for burst in crate::heuristics::burst_groups(&ledger.records) {
+        let mut seen = HashSet::new();
+        let mut op_of_source: Vec<AgentId> = Vec::new();
+        for &ix in &burst {
+            let r = &ledger.records[ix];
+            if let Some(op) = r.operator {
+                if seen.insert(r.source) {
+                    op_of_source.push(op);
+                }
+            }
+        }
+        for i in 0..op_of_source.len() {
+            for j in (i + 1)..op_of_source.len() {
+                total_pairs += 1;
+                if op_of_source[i] == op_of_source[j] {
+                    pure_pairs += 1;
+                }
+            }
+        }
+    }
+    let burst_purity = if total_pairs > 0 {
+        pure_pairs as f64 / total_pairs as f64
+    } else {
+        1.0
+    };
+
     Report {
         num_accounts: ledger.accounts().len(),
         owned_accounts: accounts.len(),
@@ -97,5 +153,99 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering) -> Report {
         attribution_f1,
         linkage_recall,
         fragmentation,
+        attribution_precision: precision,
+        burst_purity,
+        largest_cluster_frac,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::TxRecord;
+    use noise_core::types::ActionKind;
+
+    fn acc(n: u8) -> AccountId {
+        AccountId([n; 32])
+    }
+
+    fn owned(sig: u64, slot: u64, ts: i64, source: AccountId, op: AgentId) -> TxRecord {
+        TxRecord {
+            sig,
+            slot,
+            ts,
+            fee_payer: acc(200),
+            source,
+            dest: acc(240),
+            amount: 1,
+            kind: ActionKind::Transfer,
+            operator: Some(op),
+        }
+    }
+
+    /// Cluster A,B under op 0 and C under op 1, but the adversary lumps all three together.
+    #[test]
+    fn precision_exposed_and_correct() {
+        let (a, b, c) = (acc(1), acc(2), acc(3));
+        let ledger = Ledger {
+            records: vec![
+                owned(1, 1, 100, a, 0),
+                owned(2, 2, 100, b, 0),
+                owned(3, 3, 100, c, 1),
+            ],
+        };
+        let mut cluster_of = HashMap::new();
+        for x in [a, b, c] {
+            cluster_of.insert(x, 0usize); // all in one cluster => 1 tp (A,B), 2 fp (A,C),(B,C)
+        }
+        let cl = Clustering {
+            cluster_of,
+            sizes: vec![3],
+        };
+        let r = evaluate(&ledger, &cl);
+        assert!((r.attribution_precision - 1.0 / 3.0).abs() < 1e-9);
+        assert!((r.largest_cluster_frac - 1.0).abs() < 1e-9, "collapse alarm should be 1.0");
+    }
+
+    #[test]
+    fn largest_cluster_frac_small_when_fragmented() {
+        let (a, b, c) = (acc(1), acc(2), acc(3));
+        let ledger = Ledger {
+            records: vec![
+                owned(1, 1, 100, a, 0),
+                owned(2, 2, 200, b, 0),
+                owned(3, 3, 300, c, 1),
+            ],
+        };
+        let mut cluster_of = HashMap::new();
+        cluster_of.insert(a, 0usize);
+        cluster_of.insert(b, 1usize);
+        cluster_of.insert(c, 2usize);
+        let cl = Clustering {
+            cluster_of,
+            sizes: vec![1, 1, 1],
+        };
+        let r = evaluate(&ledger, &cl);
+        assert!((r.largest_cluster_frac - 1.0 / 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn burst_purity_pure_and_contaminated() {
+        // Pure: one burst, both sources same operator.
+        let (a, b) = (acc(1), acc(2));
+        let pure = Ledger {
+            records: vec![owned(1, 1, 100, a, 0), owned(2, 2, 100, b, 0)],
+        };
+        let empty = Clustering {
+            cluster_of: HashMap::new(),
+            sizes: vec![],
+        };
+        assert!((evaluate(&pure, &empty).burst_purity - 1.0).abs() < 1e-9);
+
+        // Contaminated: one burst spans two operators (a same-second collision).
+        let contaminated = Ledger {
+            records: vec![owned(1, 1, 100, a, 0), owned(2, 2, 100, b, 1)],
+        };
+        assert!(evaluate(&contaminated, &empty).burst_purity < 1.0);
     }
 }

@@ -219,6 +219,13 @@ fn emit_with_noise(
         }
         // Curupira: split the value into non-obvious parts and pay each with a FRESH
         // throwaway fee-payer, from a rotating source. No stable fee-payer to cluster on.
+        //
+        // TODO(harden-timing): every part below is recorded under the SAME `chain.clock`
+        // (set once per action in `simulate`), so all parts share one `ts` and land in a
+        // single burst — which O Cacador v2's H-COPAY/H-COACT reconstruct with F1~1.0.
+        // Fee-payer rotation is useless against this. To actually defeat v2, advance the
+        // clock by a jittered gap between parts/decoys (and decorrelate per-subaccount
+        // timing instead of one circadian clock per agent). See the hunter burst heuristics.
         Mode::Curupira => {
             let parts = noise_core::split::split_amount(p.amount, &agent.persona.split, rng);
             let parts = if parts.is_empty() {
@@ -316,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn curupira_beats_naive_on_attribution() {
+    fn cacador_v2_deanonymizes_current_curupira_honestly() {
         let personas = Persona::presets();
         let cfg = SimConfig::default();
         let (naive, curupira) = run_comparison(&personas, &cfg);
@@ -324,15 +331,46 @@ mod tests {
         let (_, rn) = analyze(&naive, &adv);
         let (_, rc) = analyze(&curupira, &adv);
 
-        // The whole thesis in one assertion: the adversary reconstructs the naive
-        // fleet well and the Curupira fleet poorly.
+        // Naive is fully reconstructed (unchanged: static fee-payer + consolidation).
+        assert!(rn.attribution_f1 > 0.9, "naive f1 {}", rn.attribution_f1);
+
+        // FINDING: O Cacador v2 recovers Curupira's fleet with high F1 too. The same-`ts`
+        // burst fan-out (chain.set_time is called once per action) is a fatal fingerprint
+        // that fee-payer rotation does nothing to hide. This SHOULD fall once the noise
+        // engine jitters timestamps across split parts / decoys — see TODO(harden-timing)
+        // in agent-runtime; when that lands, tighten this bound downward.
         assert!(
-            rn.attribution_f1 > rc.attribution_f1,
-            "naive f1 {} should exceed curupira f1 {}",
-            rn.attribution_f1,
+            rc.attribution_f1 > 0.5,
+            "v2 should recover current Curupira's burst structure, got f1 {}",
             rc.attribution_f1
         );
-        assert!(rc.fragmentation > rn.fragmentation);
-        assert!(rn.linkage_recall >= rc.linkage_recall);
+
+        // The honesty invariants — these must hold in EVERY world, hardened or not:
+        // whatever v2 links, it links for real (no trivial over-merge, no collapse).
+        assert!(
+            rc.attribution_precision >= 0.80,
+            "precision {} too low — that would be dishonest over-merging",
+            rc.attribution_precision
+        );
+        assert!(
+            rc.largest_cluster_frac < 0.5,
+            "cluster collapse: largest owned-cluster share {}",
+            rc.largest_cluster_frac
+        );
+    }
+
+    #[test]
+    fn analyze_is_deterministic_on_fixed_ledger() {
+        let personas = Persona::presets();
+        let cfg = SimConfig::default();
+        let ledger = simulate(&personas, &cfg);
+        let adv = AdversaryConfig::default();
+        let (_, r1) = analyze(&ledger, &adv);
+        let (_, r2) = analyze(&ledger, &adv);
+        // Union is commutative and thresholds are on counts, so HashMap iteration order
+        // in the burst heuristics cannot change the outcome.
+        assert_eq!(r1.attribution_f1, r2.attribution_f1);
+        assert_eq!(r1.num_clusters, r2.num_clusters);
+        assert_eq!(r1.attribution_precision, r2.attribution_precision);
     }
 }

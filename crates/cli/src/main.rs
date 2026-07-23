@@ -146,10 +146,72 @@ fn demo(agents: usize, days: i64, seed: u64) -> Result<()> {
         rc.fragmentation,
         Fmt::F2,
     );
+    println!("  {}", "-".repeat(50));
+    row(
+        "attribution precision",
+        rn.attribution_precision,
+        rc.attribution_precision,
+        Fmt::F2,
+    );
+    row("burst purity", rn.burst_purity, rc.burst_purity, Fmt::F2);
+    row(
+        "largest cluster  (down)",
+        rn.largest_cluster_frac,
+        rc.largest_cluster_frac,
+        Fmt::F2,
+    );
     println!();
     verdict(&rn, &rc);
+    ablation(&curupira);
     println!();
     Ok(())
+}
+
+/// The honesty artifact: run O Cacador on the Curupira ledger under increasing power and
+/// show WHICH signal moves attribution — and what enabling the unbounded ceiling costs in
+/// precision. This is what separates measured privacy from a lucky number.
+fn ablation(curupira: &Ledger) {
+    let v1_only = AdversaryConfig {
+        use_burst_copay: false,
+        use_burst_coactivity: false,
+        use_burst_union_ceiling: false,
+        ..AdversaryConfig::default()
+    };
+    let copay_only = AdversaryConfig {
+        use_burst_coactivity: false,
+        ..AdversaryConfig::default()
+    };
+    let default = AdversaryConfig::default();
+    let ceiling = AdversaryConfig {
+        use_burst_union_ceiling: true,
+        ..AdversaryConfig::default()
+    };
+
+    let configs: [(&str, &AdversaryConfig); 4] = [
+        ("baseline (v1)", &v1_only),
+        ("+copay", &copay_only),
+        ("+copay+coact*", &default),
+        ("+ceiling", &ceiling),
+    ];
+
+    println!();
+    println!("  O Cacador ablation on the Curupira ledger (* = shipped default):");
+    println!(
+        "  {:<16}{:>8}{:>8}{:>8}{:>8}",
+        "adversary", "F1", "prec", "recall", "frag"
+    );
+    println!("  {}", "-".repeat(48));
+    for (name, adv) in configs {
+        let (_, r) = analyze(curupira, adv);
+        println!(
+            "  {:<16}{:>8.2}{:>8.2}{:>8.2}{:>8.2}",
+            name, r.attribution_f1, r.attribution_precision, r.linkage_recall, r.fragmentation
+        );
+    }
+    println!("  Reading: the v1 adversary is defeated (F1~0) — the old claim. The v2 burst");
+    println!("  heuristics recover the fleet at high precision. The unbounded ceiling merges");
+    println!("  same-second collision bursts, so it scores LOWER F1 at worse precision — the");
+    println!("  thresholds are strictly better, proof the number tracks real inference.");
 }
 
 enum Fmt {
@@ -166,16 +228,25 @@ fn row(label: &str, naive: f64, curupira: f64, fmt: Fmt) {
 }
 
 fn verdict(naive: &Report, curupira: &Report) {
-    let drop = if naive.attribution_f1 > 0.0 {
-        (1.0 - curupira.attribution_f1 / naive.attribution_f1) * 100.0
+    // Honest verdict: only claim a win if attribution actually fell AND stayed honest.
+    let helped = curupira.attribution_f1 + 0.05 < naive.attribution_f1
+        && curupira.attribution_precision >= 0.80;
+    if helped {
+        let drop = (1.0 - curupira.attribution_f1 / naive.attribution_f1) * 100.0;
+        println!(
+            "  Verdict: attribution F1 {:.2} -> {:.2} (-{:.0}%). The observer that pinned",
+            naive.attribution_f1, curupira.attribution_f1, drop
+        );
+        println!("  each account to one operator no longer can. Noise measured, not promised.");
     } else {
-        0.0
-    };
-    println!(
-        "  Verdict: attribution F1 {:.2} -> {:.2} ({:+.0}%). The observer that pinned",
-        naive.attribution_f1, curupira.attribution_f1, -drop
-    );
-    println!("  each account to one operator no longer can. Noise measured, not promised.");
+        println!(
+            "  Verdict: under O Cacador v2 the noise DOES NOT help — F1 {:.2} (naive {:.2}).",
+            curupira.attribution_f1, naive.attribution_f1
+        );
+        println!("  The same-timestamp burst fan-out fully de-anonymizes the current engine.");
+        println!("  Privacy measured to be ABSENT against a competent adversary — the harness");
+        println!("  did its job. Hardening (per-tx timestamp jitter) is the next step.");
+    }
 }
 
 fn dump(mode: &str, agents: usize, days: i64, seed: u64, out: &str) -> Result<()> {
