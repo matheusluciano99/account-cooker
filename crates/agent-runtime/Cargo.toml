@@ -1,0 +1,28 @@
+[package]
+name = "agent-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fleet orchestrator. Offline deterministic simulator by default; real Solana under `live`."
+
+[features]
+default = []
+# Real on-chain execution against a Solana RPC. Pulls solana-sdk/solana-client.
+live = ["dep:solana-sdk", "dep:solana-client", "dep:solana-system-interface"]
+
+[dependencies]
+noise-core.workspace = true
+persona.workspace = true
+hunter.workspace = true
+adapters.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# StdRng in rand 0.10 is a newtype over chacha20::ChaCha12Rng; depend on it directly so we can
+# checkpoint the RNG (serialize_state) for durable resume. Already compiled via rand's std_rng.
+chacha20 = { version = "0.10", features = ["rng"] }
+sha2.workspace = true
+
+solana-sdk = { version = "4", optional = true }
+solana-client = { version = "4", optional = true }
+solana-system-interface = { version = "3", optional = true }

@@ -1,0 +1,11 @@
+[package]
+name = "hunter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "O Cacador — adversarial chain-analysis harness that MEASURES how linkable a ledger is."
+
+[dependencies]
+noise-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
