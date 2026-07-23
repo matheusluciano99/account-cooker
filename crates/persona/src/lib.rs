@@ -10,6 +10,28 @@ use rand::{Rng, RngExt};
 use rand_distr::{Distribution, LogNormal};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersonaValidationError {
+    message: String,
+}
+
+impl PersonaValidationError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for PersonaValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PersonaValidationError {}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Persona {
@@ -34,6 +56,99 @@ fn default_sigma() -> f64 {
 }
 
 impl Persona {
+    /// Reject malformed or unsafe profiles before a long-running fleet starts.
+    pub fn validate(&self) -> Result<(), PersonaValidationError> {
+        if self.name.trim().is_empty() {
+            return Err(PersonaValidationError::new("name must not be empty"));
+        }
+        if self.wealth_tier.trim().is_empty() {
+            return Err(PersonaValidationError::new("wealth_tier must not be empty"));
+        }
+        if self.base_amount_lamports == 0 {
+            return Err(PersonaValidationError::new(
+                "base_amount_lamports must be greater than zero",
+            ));
+        }
+        if !self.amount_sigma.is_finite() || self.amount_sigma <= 0.0 {
+            return Err(PersonaValidationError::new(
+                "amount_sigma must be finite and greater than zero",
+            ));
+        }
+        if self.num_subaccounts == 0 {
+            return Err(PersonaValidationError::new(
+                "num_subaccounts must be greater than zero",
+            ));
+        }
+        if self.split.min_parts == 0 || self.split.max_parts < self.split.min_parts {
+            return Err(PersonaValidationError::new(
+                "split parts must satisfy 1 <= min_parts <= max_parts",
+            ));
+        }
+        if self.split.min_part_lamports == 0 {
+            return Err(PersonaValidationError::new(
+                "split.min_part_lamports must be greater than zero",
+            ));
+        }
+        if !self.decoy.decoys_per_real.is_finite() || self.decoy.decoys_per_real < 0.0 {
+            return Err(PersonaValidationError::new(
+                "decoy.decoys_per_real must be finite and non-negative",
+            ));
+        }
+        if self.decoy.dust_lamports_max == 0 {
+            return Err(PersonaValidationError::new(
+                "decoy.dust_lamports_max must be greater than zero",
+            ));
+        }
+        if !self.circadian.actions_per_active_hour.is_finite()
+            || self.circadian.actions_per_active_hour <= 0.0
+        {
+            return Err(PersonaValidationError::new(
+                "circadian.actions_per_active_hour must be finite and greater than zero",
+            ));
+        }
+        if !self.circadian.jitter.is_finite() || !(0.0..=1.0).contains(&self.circadian.jitter) {
+            return Err(PersonaValidationError::new(
+                "circadian.jitter must be between 0 and 1",
+            ));
+        }
+        if self
+            .circadian
+            .hourly_weights
+            .iter()
+            .any(|weight| !weight.is_finite() || *weight < 0.0)
+            || !self
+                .circadian
+                .hourly_weights
+                .iter()
+                .any(|weight| *weight > 0.0)
+        {
+            return Err(PersonaValidationError::new(
+                "circadian.hourly_weights must be finite, non-negative, and not all zero",
+            ));
+        }
+
+        let mut recognized_positive_weight = false;
+        for (key, weight) in &self.action_weights {
+            if ActionKind::from_key(key).is_none() {
+                return Err(PersonaValidationError::new(format!(
+                    "unknown action_weights key '{key}'"
+                )));
+            }
+            if !weight.is_finite() || *weight < 0.0 {
+                return Err(PersonaValidationError::new(format!(
+                    "action weight '{key}' must be finite and non-negative"
+                )));
+            }
+            recognized_positive_weight |= *weight > 0.0;
+        }
+        if !recognized_positive_weight {
+            return Err(PersonaValidationError::new(
+                "at least one action weight must be greater than zero",
+            ));
+        }
+        Ok(())
+    }
+
     /// Weighted pick of the next action kind. Falls back to `Transfer` if the table is empty.
     pub fn choose_action(&self, rng: &mut impl Rng) -> ActionKind {
         let total: f64 = self
@@ -192,10 +307,30 @@ mod tests {
     #[test]
     fn presets_serialize_to_toml_and_back() {
         for p in Persona::presets() {
+            p.validate().unwrap();
             let s = toml::to_string(&p).unwrap();
             let back = Persona::from_toml_str(&s).unwrap();
             assert_eq!(back.name, p.name);
             assert_eq!(back.num_subaccounts, p.num_subaccounts);
         }
+    }
+
+    #[test]
+    fn validation_rejects_unknown_actions_and_unsafe_values() {
+        let mut p = Persona::retail();
+        p.action_weights.insert("teleport".into(), 1.0);
+        assert!(p.validate().unwrap_err().to_string().contains("teleport"));
+
+        let mut p = Persona::retail();
+        p.circadian.jitter = 1.5;
+        assert!(p.validate().unwrap_err().to_string().contains("jitter"));
+
+        let mut p = Persona::retail();
+        p.num_subaccounts = 0;
+        assert!(p
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("num_subaccounts"));
     }
 }

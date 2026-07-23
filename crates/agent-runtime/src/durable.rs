@@ -1,7 +1,7 @@
 //! Crash-safe checkpoint/resume for a fleet run.
 //!
 //! A run writes an append-only `ledger.jsonl` journal and periodically an atomically-replaced
-//! `checkpoint.json` control snapshot (RNG state + counters + per-entry schedule). If the
+//! `checkpoint.json` control snapshot (RNG, counters, schedule, and rotated accounts). If the
 //! process is killed mid-run, `resume_durable` truncates any un-checkpointed journal tail and
 //! continues from the last checkpoint. Because the sim is deterministic, the resumed final
 //! ledger is byte-identical to an uninterrupted run of the same `(personas, cfg)`.
@@ -9,13 +9,14 @@
 //! Storage layout (a run directory):
 //! ```text
 //! <dir>/ledger.jsonl        append-only, one compact-JSON TxRecord per line
-//! <dir>/checkpoint.json     atomically-replaced control snapshot (tiny)
+//! <dir>/checkpoint.json     atomically-replaced control + account-state snapshot
 //! <dir>/checkpoint.json.tmp transient temp file for the temp+rename write
 //! ```
 
 use crate::{build_fresh, run_core, DurSink, RunState, SimConfig};
 use chacha20::ChaCha12Rng;
 use hunter::model::{Ledger, TxRecord};
+use noise_core::types::AccountId;
 use persona::Persona;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,7 +26,7 @@ use std::io::{self, BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// On-disk format version. Resume refuses a checkpoint with a different version.
-pub const CHECKPOINT_FORMAT: u32 = 1;
+pub const CHECKPOINT_FORMAT: u32 = 2;
 
 /// Identity of a run: resume refuses to continue a checkpoint whose `(personas, cfg)` differ.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -47,8 +48,8 @@ impl RunId {
         let mut h = Sha256::new();
         h.update(serde_json::to_vec(personas).expect("personas serialize"));
         h.update(serde_json::to_vec(&cfg.hardening).expect("hardening serialize"));
-        // Fold funding into the digest only when set, so a `None` run keeps the exact v3 digest
-        // (pre-funding checkpoints still resume); a funding-policy change is then refused.
+        // Fold funding into the digest only when set. This preserves deterministic identities
+        // for unfunded runs while ensuring a funding-policy change is refused on resume.
         if let Some(f) = &cfg.funding {
             h.update(serde_json::to_vec(f).expect("funding serialize"));
         }
@@ -66,8 +67,9 @@ impl RunId {
     }
 }
 
-/// A durable control snapshot. Tiny: the RNG blob is 49 bytes, plus counters and one `i64`
-/// per schedule entry.
+/// A durable control snapshot. It holds the 49-byte RNG blob, counters, one timestamp per
+/// schedule entry, and the current account identities. Transaction records remain in the
+/// append-only journal instead of being copied into every checkpoint.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Checkpoint {
     pub format: u32,
@@ -79,6 +81,10 @@ pub struct Checkpoint {
     pub sig: u64,
     /// `next_at[si]` for every schedule index (the heap is full at a boundary).
     pub next_at: Vec<i64>,
+    /// Current rotating account identities for each agent. Address rotation makes this
+    /// dynamic state, so it must be checkpointed alongside the RNG and scheduler.
+    pub agent_subaccounts: Vec<Vec<AccountId>>,
+    pub agent_mains: Vec<AccountId>,
     /// Records durably written to the journal == `sig` == `slot` == `ledger.records.len()`.
     pub records_emitted: u64,
     /// Byte length of `ledger.jsonl` covering exactly `records_emitted` records.
@@ -123,6 +129,12 @@ impl RunState {
             slot: self.chain.slot,
             sig: self.chain.sig,
             next_at,
+            agent_subaccounts: self
+                .agents
+                .iter()
+                .map(|agent| agent.subaccounts.clone())
+                .collect(),
+            agent_mains: self.agents.iter().map(|agent| agent.main).collect(),
             records_emitted: self.chain.ledger.records.len() as u64,
             journal_len_bytes,
             events: self.events,
@@ -281,6 +293,26 @@ pub fn resume_durable(
             io::ErrorKind::InvalidData,
             "next_at length != schedule length",
         ));
+    }
+    if cp.agent_subaccounts.len() != st.agents.len() || cp.agent_mains.len() != st.agents.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "checkpoint agent account state length mismatch",
+        ));
+    }
+    for (agent, (subaccounts, main)) in st
+        .agents
+        .iter_mut()
+        .zip(cp.agent_subaccounts.into_iter().zip(cp.agent_mains))
+    {
+        if subaccounts.len() != agent.subaccounts.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "checkpoint subaccount state length mismatch",
+            ));
+        }
+        agent.subaccounts = subaccounts;
+        agent.main = main;
     }
     let blob: [u8; 49] = cp
         .rng_state
@@ -550,9 +582,9 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A `None`-funding run keeps the exact pre-funding RunId digest (old checkpoints resume).
+    /// A `None`-funding run keeps the deterministic digest of the unfunded input set.
     #[test]
-    fn funding_none_keeps_v3_digest() {
+    fn funding_none_keeps_unfunded_digest() {
         use crate::{FundingConfig, FundingPolicy};
         let personas = Persona::presets();
         let none = small_cfg(Mode::Curupira, true);

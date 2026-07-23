@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Command-line interface: run the fleet, analyze ledgers, prove the before/after."
 
+[features]
+default = []
+live = ["agent-runtime/live"]
+
 [[bin]]
 name = "curupira"
 path = "src/main.rs"

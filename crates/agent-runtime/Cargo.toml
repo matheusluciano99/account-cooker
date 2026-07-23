@@ -8,7 +8,13 @@ description = "Fleet orchestrator. Offline deterministic simulator by default; r
 [features]
 default = []
 # Real on-chain execution against a Solana RPC. Pulls solana-sdk/solana-client.
-live = ["dep:solana-sdk", "dep:solana-client", "dep:solana-system-interface"]
+live = [
+    "dep:solana-sdk",
+    "dep:solana-client",
+    "dep:solana-system-interface",
+    "dep:solana-commitment-config",
+    "dep:url",
+]
 
 [dependencies]
 noise-core.workspace = true
@@ -26,3 +32,5 @@ sha2.workspace = true
 solana-sdk = { version = "4", optional = true }
 solana-client = { version = "4", optional = true }
 solana-system-interface = { version = "3", optional = true }
+solana-commitment-config = { version = "3", optional = true }
+url = { version = "2", optional = true }

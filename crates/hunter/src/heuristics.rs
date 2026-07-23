@@ -6,7 +6,7 @@
 //! cooker must beat. Everything here is honest heuristic — no ground-truth peeking.
 
 use crate::model::{Ledger, TxRecord};
-use noise_core::types::{AccountId, ActionKind};
+use noise_core::types::AccountId;
 use std::collections::{BTreeSet, HashMap};
 
 /// Union-find over account ids (path halving + union by rank).
@@ -71,6 +71,10 @@ pub struct AdversaryConfig {
     pub use_temporal_amount: bool,
     pub temporal_window_secs: i64,
     pub amount_tolerance_bps: u32,
+    /// H-ACTIVATE: a transfer into a previously unseen account that soon becomes an active
+    /// source is evidence of key/account rotation.
+    pub use_activation_lineage: bool,
+    pub activation_window_secs: i64,
 
     /// H-COPAY: sources paying a common destination in the same group are the same entity.
     pub use_burst_copay: bool,
@@ -85,8 +89,9 @@ pub struct AdversaryConfig {
     /// Drop any group with more distinct sources than this. Must exceed the largest honest
     /// subaccount count (whale = 8) so no genuine group is ever dropped.
     pub burst_max_sources: usize,
-    /// Exclude `kind == Dust` when building copay buckets.
-    pub exclude_dust_from_copay: bool,
+    /// Ignore co-payments below this observable amount. Zero means no amount filter.
+    /// This deliberately replaces semantic `Dust` labels, which do not exist on-chain.
+    pub copay_min_amount: u64,
     /// Ablation only: union every source in a group with no repetition threshold.
     pub use_burst_union_ceiling: bool,
     /// Optional subtractive guard: drop a copay bucket that has any non-dust part below
@@ -104,8 +109,9 @@ pub struct AdversaryConfig {
     pub use_funder_graph: bool,
     /// A funder must have funded at least this many distinct fee-payers to count as a pattern.
     pub funder_min_fundees: usize,
-    /// Drop a funder whose downstream sources exceed this — it is a shared service (relayer,
-    /// exchange), not one owner. Mirrors `burst_max_sources` (just above the whale's 8 subs).
+    /// Optional ceiling for downstream sources. The default is intentionally high: a large
+    /// rotating fleet must not be mistaken for a shared service merely because it is large.
+    /// Analysts may lower this only as an explicit shared-service ablation.
     pub funder_max_sources: usize,
 }
 
@@ -117,6 +123,8 @@ impl Default for AdversaryConfig {
             use_temporal_amount: true,
             temporal_window_secs: 120,
             amount_tolerance_bps: 50,
+            use_activation_lineage: true,
+            activation_window_secs: 2 * 86_400,
 
             use_burst_copay: true,
             copay_min_sources: 2,
@@ -124,7 +132,7 @@ impl Default for AdversaryConfig {
             use_burst_coactivity: true,
             coactivity_min_shared_bursts: 3,
             burst_max_sources: 10,
-            exclude_dust_from_copay: true,
+            copay_min_amount: 0,
             use_burst_union_ceiling: false,
             use_split_shape_guard: false,
             split_min_part_floor: 1_000,
@@ -132,20 +140,19 @@ impl Default for AdversaryConfig {
             window_secs: 120,
             use_funder_graph: false,
             funder_min_fundees: 3,
-            funder_max_sources: 10,
+            funder_max_sources: 100_000,
         }
     }
 }
 
 impl AdversaryConfig {
-    /// Groups by a Δt window rather than an exact `ts`. Disables dest-agnostic co-activity
-    /// (a window spans multiple operators, so it would union across them) and raises the
-    /// copay repetition bar, leaving dest-keyed co-payment as the signal.
+    /// Adds destination-local Δt episodes to the exact-timestamp signals. Co-activity stays
+    /// restricted to exact timestamps; applying it to broad windows would merge unrelated
+    /// operators. The higher co-payment repetition bar bounds shared-destination collisions.
     pub fn windowed(window_secs: i64) -> Self {
         AdversaryConfig {
             use_windowed: true,
             window_secs,
-            use_burst_coactivity: false,
             copay_min_shared_buckets: 3,
             ..AdversaryConfig::default()
         }
@@ -195,22 +202,24 @@ pub(crate) fn burst_groups(records: &[TxRecord]) -> Vec<Vec<usize>> {
     groups
 }
 
-/// Disjoint time-window grouping. Sort by (ts, slot, sig); open a window at the first
-/// unassigned record and absorb every following record with `ts <= start_ts + window_secs`,
-/// then start a fresh window. Reads only ts/slot/sig, never `operator`.
+/// Time-proximity components. Sort by (ts, slot, sig) and keep adjacent records in the
+/// same component while their gap is at most `window_secs`. Reads only ts/slot/sig, never
+/// `operator`.
 ///
 /// `window_secs == 0` groups records with identical `ts` (a superset of `burst_groups`);
-/// a larger window groups a superset of pairs, monotone in `window_secs`.
+/// widening the window can only merge components, never split them.
 pub(crate) fn window_groups(records: &[TxRecord], window_secs: i64) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..records.len()).collect();
     order.sort_by_key(|&i| (records[i].ts, records[i].slot, records[i].sig));
+    let window_secs = window_secs.max(0);
     let mut groups = Vec::new();
     let mut i = 0;
     while i < order.len() {
-        let start_ts = records[order[i]].ts;
         let mut g = vec![order[i]];
+        let mut previous_ts = records[order[i]].ts;
         i += 1;
-        while i < order.len() && records[order[i]].ts <= start_ts + window_secs {
+        while i < order.len() && records[order[i]].ts.saturating_sub(previous_ts) <= window_secs {
+            previous_ts = records[order[i]].ts;
             g.push(order[i]);
             i += 1;
         }
@@ -232,7 +241,7 @@ fn copay_edges(
         let mut by_dest: HashMap<AccountId, (BTreeSet<AccountId>, bool)> = HashMap::new();
         for &ix in group {
             let r = &records[ix];
-            if cfg.exclude_dust_from_copay && r.kind == ActionKind::Dust {
+            if r.amount < cfg.copay_min_amount {
                 continue;
             }
             let e = by_dest
@@ -261,8 +270,70 @@ fn copay_edges(
     weight
 }
 
+/// Destination-local co-payment episodes for the windowed adversary. Global fixed buckets
+/// have arbitrary boundaries: an unrelated transaction can split two payments that are only
+/// seconds apart. A real analyst indexes each destination independently and starts a new
+/// episode only after a gap larger than the configured window.
+fn windowed_copay_edges(
+    records: &[TxRecord],
+    cfg: &AdversaryConfig,
+) -> HashMap<(AccountId, AccountId), u32> {
+    let active_sources: std::collections::HashSet<AccountId> =
+        records.iter().map(|r| r.source).collect();
+    let mut by_dest: HashMap<AccountId, Vec<usize>> = HashMap::new();
+    for (ix, r) in records.iter().enumerate() {
+        // A shared protocol, exchange, or merchant can receive from many unrelated users.
+        // Restrict the windowed consolidation signal to destinations that later transact,
+        // which is observable evidence that the destination may be an internal hub.
+        if r.amount >= cfg.copay_min_amount && active_sources.contains(&r.dest) {
+            by_dest.entry(r.dest).or_default().push(ix);
+        }
+    }
+
+    let mut weight: HashMap<(AccountId, AccountId), u32> = HashMap::new();
+    let window = cfg.window_secs.max(0);
+    for indices in by_dest.values_mut() {
+        indices.sort_by_key(|&ix| (records[ix].ts, records[ix].slot, records[ix].sig));
+        let mut start = 0;
+        while start < indices.len() {
+            let mut end = start + 1;
+            while end < indices.len()
+                && records[indices[end]]
+                    .ts
+                    .saturating_sub(records[indices[end - 1]].ts)
+                    <= window
+            {
+                end += 1;
+            }
+
+            let mut srcs: BTreeSet<AccountId> = BTreeSet::new();
+            let mut has_subfloor = false;
+            for &ix in &indices[start..end] {
+                let r = &records[ix];
+                srcs.insert(r.source);
+                has_subfloor |= r.amount < cfg.split_min_part_floor;
+            }
+            if !(cfg.use_split_shape_guard && has_subfloor)
+                && srcs.len() >= cfg.copay_min_sources
+                && srcs.len() <= cfg.burst_max_sources
+            {
+                let sources: Vec<AccountId> = srcs.into_iter().collect();
+                for x in 0..sources.len() {
+                    for y in (x + 1)..sources.len() {
+                        *weight.entry((sources[x], sources[y])).or_insert(0) += 1;
+                    }
+                }
+            }
+            start = end;
+        }
+    }
+    weight
+}
+
 /// H-COACT edge weights: within each group, take the whole set of distinct sources
-/// (dest-agnostic, Dust included) and count each group once per source-pair.
+/// from sponsored transactions and count each group once per source-pair. Self-paid
+/// transactions are excluded: unrelated funders submitting in the same second are not
+/// evidence of common control.
 fn coact_edges(
     groups: &[Vec<usize>],
     records: &[TxRecord],
@@ -272,7 +343,10 @@ fn coact_edges(
     for group in groups {
         let mut srcs: BTreeSet<AccountId> = BTreeSet::new();
         for &ix in group {
-            srcs.insert(records[ix].source);
+            let r = &records[ix];
+            if r.fee_payer != r.source {
+                srcs.insert(r.source);
+            }
         }
         if srcs.len() < 2 || srcs.len() > cfg.burst_max_sources {
             continue;
@@ -324,19 +398,25 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
         }
     }
 
-    // (2) Co-spend / consolidation. Inputs funneled into a common destination are
-    // common-input-ownership evidence.
+    // (2) Structural consolidation. A destination that is also an active source and
+    // receives value from a small set of distinct sources looks like an internal hub.
+    // This uses only graph structure; `ActionKind::Consolidate` is simulator intent and
+    // is deliberately not available to the adversary.
     if cfg.use_cospend {
-        let mut rep_by_dest: HashMap<AccountId, AccountId> = HashMap::new();
+        let active_sources: std::collections::HashSet<AccountId> =
+            ledger.records.iter().map(|r| r.source).collect();
+        let mut sources_by_dest: HashMap<AccountId, BTreeSet<AccountId>> = HashMap::new();
         for r in &ledger.records {
-            if r.kind == ActionKind::Consolidate {
-                uf.union(r.source, r.dest);
-                match rep_by_dest.get(&r.dest) {
-                    Some(&rep) => uf.union(rep, r.source),
-                    None => {
-                        rep_by_dest.insert(r.dest, r.source);
-                    }
-                }
+            if r.amount > 0 && r.source != r.dest && active_sources.contains(&r.dest) {
+                sources_by_dest.entry(r.dest).or_default().insert(r.source);
+            }
+        }
+        for (dest, sources) in sources_by_dest {
+            if sources.len() < 2 || sources.len() > cfg.burst_max_sources {
+                continue;
+            }
+            for source in sources {
+                uf.union(dest, source);
             }
         }
     }
@@ -348,7 +428,7 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
         let txs: Vec<&TxRecord> = ledger
             .records
             .iter()
-            .filter(|r| matches!(r.kind, ActionKind::Transfer | ActionKind::Swap))
+            .filter(|r| r.amount > 0 && r.source != r.dest)
             .collect();
 
         let mut by_source: HashMap<AccountId, Vec<(i64, u64, u64, AccountId)>> = HashMap::new();
@@ -381,6 +461,32 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
         }
     }
 
+    // (4) Account-activation lineage. When value enters a previously inactive address and
+    // that exact address starts signing shortly afterwards, link the predecessor and
+    // successor. This is the public residual of one-to-one account rotation.
+    if cfg.use_activation_lineage {
+        let mut first_source_at: HashMap<AccountId, i64> = HashMap::new();
+        for r in &ledger.records {
+            first_source_at
+                .entry(r.source)
+                .and_modify(|ts| *ts = (*ts).min(r.ts))
+                .or_insert(r.ts);
+        }
+        let window = cfg.activation_window_secs.max(0);
+        for r in &ledger.records {
+            let Some(&activated_at) = first_source_at.get(&r.dest) else {
+                continue;
+            };
+            if r.amount > 0
+                && r.source != r.dest
+                && activated_at >= r.ts
+                && activated_at.saturating_sub(r.ts) <= window
+            {
+                uf.union(r.source, r.dest);
+            }
+        }
+    }
+
     // Group records once (identical-ts bursts or Δt windows), then run the thresholded
     // copay/coact linkers over the groups. Repetition thresholds and `burst_max_sources`
     // bound false positives.
@@ -393,17 +499,30 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
     // (4) Common-destination co-payment: sources sharing a (group, dest) bucket in
     // >= copay_min_shared_buckets groups are unioned.
     if cfg.use_burst_copay {
-        for (&(a, b), &w) in &copay_edges(&groups, &ledger.records, cfg) {
+        let edges = if cfg.use_windowed {
+            windowed_copay_edges(&ledger.records, cfg)
+        } else {
+            copay_edges(&groups, &ledger.records, cfg)
+        };
+        for (&(a, b), &w) in &edges {
             if w >= cfg.copay_min_shared_buckets {
                 uf.union(a, b);
             }
         }
     }
 
-    // (5) Whole-group co-activity (dest-agnostic): sources co-present in
-    // >= coactivity_min_shared_bursts groups are unioned. Catches cross-dest / dust-only pairs.
+    // (5) Exact-timestamp co-activity (dest-agnostic): sources co-present in
+    // >= coactivity_min_shared_bursts groups are unioned. Even the windowed adversary retains
+    // this narrower signal; applying co-activity to broad windows would over-merge operators.
     if cfg.use_burst_coactivity {
-        for (&(a, b), &w) in &coact_edges(&groups, &ledger.records, cfg) {
+        let exact_groups;
+        let coactivity_groups = if cfg.use_windowed {
+            exact_groups = burst_groups(&ledger.records);
+            &exact_groups
+        } else {
+            &groups
+        };
+        for (&(a, b), &w) in &coact_edges(coactivity_groups, &ledger.records, cfg) {
             if w >= cfg.coactivity_min_shared_bursts {
                 uf.union(a, b);
             }
@@ -482,6 +601,7 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noise_core::types::ActionKind;
 
     #[test]
     fn union_find_basic() {
@@ -536,6 +656,7 @@ mod tests {
             use_fee_payer: false,
             use_cospend: false,
             use_temporal_amount: false,
+            use_activation_lineage: false,
             use_burst_copay: copay,
             use_burst_coactivity: coact,
             use_burst_union_ceiling: ceiling,
@@ -621,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn copay_excludes_dust() {
+    fn copay_amount_floor_uses_only_observable_value() {
         let (s1, s2, s3, d) = (acc(1), acc(2), acc(3), acc(10));
         let recs = vec![
             rec(1, 1, 100, s1, d, 1_000_000, Transfer),
@@ -631,11 +752,90 @@ mod tests {
             rec(5, 5, 200, s2, d, 1_000_000, Transfer),
             rec(6, 6, 200, s3, d, 5_000, Dust),
         ];
-        let cl = cluster(&led(recs), &only(true, false, false));
+        let cfg = AdversaryConfig {
+            copay_min_amount: 10_000,
+            ..only(true, false, false)
+        };
+        let cl = cluster(&led(recs), &cfg);
         assert!(same(&cl, s1, s2), "real parts co-pay");
         assert!(
             !same(&cl, s1, s3),
-            "dust source must be excluded from copay"
+            "the public amount floor excludes the small transfer without reading its kind"
+        );
+    }
+
+    #[test]
+    fn structural_cospend_does_not_read_action_kind() {
+        let (s1, s2, hub, external) = (acc(1), acc(2), acc(9), acc(10));
+        let records = vec![
+            rec(1, 1, 100, s1, hub, 20_000, Dust),
+            rec(2, 2, 101, s2, hub, 30_000, Transfer),
+            // The destination is an active account, which is the public hub signal.
+            rec(3, 3, 200, hub, external, 40_000, Transfer),
+        ];
+        let cfg = AdversaryConfig {
+            use_cospend: true,
+            ..only(false, false, false)
+        };
+        let cl = cluster(&led(records), &cfg);
+        assert!(same(&cl, s1, s2));
+        assert!(same(&cl, s1, hub));
+    }
+
+    #[test]
+    fn structural_cospend_ignores_external_sink() {
+        let (s1, s2, external) = (acc(1), acc(2), acc(10));
+        let records = vec![
+            rec(1, 1, 100, s1, external, 20_000, Transfer),
+            rec(2, 2, 101, s2, external, 30_000, Transfer),
+        ];
+        let cfg = AdversaryConfig {
+            use_cospend: true,
+            ..only(false, false, false)
+        };
+        let cl = cluster(&led(records), &cfg);
+        assert!(
+            !same(&cl, s1, s2),
+            "a passive protocol/counterparty is not an internal hub"
+        );
+    }
+
+    #[test]
+    fn activation_lineage_links_a_rotated_account_without_kind_labels() {
+        let (old, successor, external) = (acc(1), acc(2), acc(10));
+        let records = vec![
+            rec(1, 1, 100, old, successor, 50_000, Dust),
+            rec(2, 2, 200, successor, external, 70_000, Transfer),
+        ];
+        let cfg = AdversaryConfig {
+            use_activation_lineage: true,
+            activation_window_secs: 500,
+            ..only(false, false, false)
+        };
+        assert!(same(&cluster(&led(records), &cfg), old, successor));
+    }
+
+    #[test]
+    fn activation_lineage_respects_time_and_inactive_destinations() {
+        let (old, late, passive) = (acc(1), acc(2), acc(3));
+        let records = vec![
+            rec(1, 1, 100, old, late, 50_000, Transfer),
+            rec(2, 2, 101, old, passive, 50_000, Transfer),
+            rec(3, 3, 1000, late, acc(10), 70_000, Transfer),
+        ];
+        let cfg = AdversaryConfig {
+            use_activation_lineage: true,
+            activation_window_secs: 500,
+            ..only(false, false, false)
+        };
+        let cl = cluster(&led(records), &cfg);
+        assert!(
+            !same(&cl, old, late),
+            "late activation is outside the window"
+        );
+        assert!(
+            !same(&cl, old, passive),
+            "a destination that never signs is not a successor"
         );
     }
 
@@ -844,6 +1044,23 @@ mod tests {
     }
 
     #[test]
+    fn widening_window_never_loses_a_boundary_pair() {
+        let z = acc(0);
+        let recs = vec![
+            rec(1, 1, 0, z, z, 0, Transfer),
+            rec(2, 2, 70, z, z, 0, Transfer),
+            rec(3, 3, 130, z, z, 0, Transfer),
+        ];
+        let narrow = pairs_of(&window_groups(&recs, 60), &recs);
+        let wide = pairs_of(&window_groups(&recs, 120), &recs);
+        assert!(narrow.contains(&(2, 3)));
+        assert!(
+            narrow.is_subset(&wide),
+            "widening a proximity threshold must not discard an existing pair"
+        );
+    }
+
+    #[test]
     fn window_groups_deterministic_under_shuffle() {
         let z = acc(0);
         let recs = vec![
@@ -869,6 +1086,7 @@ mod tests {
             rec(2, 2, 105, s2, hub, 1_000_000, Transfer),
             rec(3, 3, 1000, s1, hub, 1_000_000, Transfer),
             rec(4, 4, 1006, s2, hub, 1_000_000, Transfer),
+            rec(5, 5, 2000, hub, acc(30), 10_000, Transfer),
         ];
         let cl_exact = cluster(&led(recs.clone()), &only(true, false, false));
         assert!(
@@ -879,6 +1097,24 @@ mod tests {
         assert!(
             same(&cl_win, s1, s2),
             "windowed catches it (2 shared window+hub buckets)"
+        );
+    }
+
+    #[test]
+    fn destination_local_window_ignores_global_bucket_boundaries() {
+        let (s1, s2, hub, unrelated) = (acc(1), acc(2), acc(9), acc(30));
+        let recs = vec![
+            rec(1, 1, 0, unrelated, acc(31), 1_000_000, Transfer),
+            rec(2, 2, 119, s1, hub, 1_000_000, Transfer),
+            rec(3, 3, 121, s2, hub, 1_000_000, Transfer),
+            rec(4, 4, 1000, s1, hub, 1_000_000, Transfer),
+            rec(5, 5, 1002, s2, hub, 1_000_000, Transfer),
+            rec(6, 6, 2000, hub, acc(32), 10_000, Transfer),
+        ];
+        let cl = cluster(&led(recs), &win_only(true, false, 120));
+        assert!(
+            same(&cl, s1, s2),
+            "destination-local episodes recover both sweeps despite unrelated records"
         );
     }
 
@@ -898,16 +1134,18 @@ mod tests {
             rec(8, 8, 6005, s2b, d, 1_000_000, Transfer),
         ];
         let cl = cluster(&led(recs), &win_only(true, false, 120));
-        assert!(same(&cl, s1, s1b));
-        assert!(same(&cl, s2, s2b));
         assert!(
             !same(&cl, s1, s2),
             "shared external at different windows must not merge"
         );
+        assert!(
+            !same(&cl, s1, s1b) && !same(&cl, s2, s2b),
+            "a passive shared destination is intentionally not treated as an owned hub"
+        );
     }
 
     #[test]
-    fn windowed_coact_threshold() {
+    fn windowed_does_not_apply_coactivity_to_broad_windows() {
         let (s1, s2, d1, d2) = (acc(1), acc(2), acc(21), acc(22));
         let make = |wins: usize| {
             let mut recs = Vec::new();
@@ -922,9 +1160,10 @@ mod tests {
             recs
         };
         let cl3 = cluster(&led(make(3)), &win_only(false, true, 120));
-        assert!(same(&cl3, s1, s2), "3 co-windows unions (threshold 3)");
-        let cl2 = cluster(&led(make(2)), &win_only(false, true, 120));
-        assert!(!same(&cl2, s1, s2), "2 co-windows is below threshold 3");
+        assert!(
+            !same(&cl3, s1, s2),
+            "dest-agnostic coactivity is restricted to exact timestamps"
+        );
     }
 
     #[test]
@@ -946,6 +1185,8 @@ mod tests {
                 ));
             }
         }
+        sig += 1;
+        recs.push(rec(sig, sig, 4000, hub, acc(60), 10_000, Transfer));
         let cl = cluster(&led(recs), &win_only(true, false, 120));
         assert!(
             !same(&cl, acc(1), acc(2)),
@@ -958,6 +1199,7 @@ mod tests {
             use_fee_payer: false,
             use_cospend: false,
             use_temporal_amount: true,
+            use_activation_lineage: false,
             use_burst_copay: false,
             use_burst_coactivity: false,
             ..AdversaryConfig::default()
@@ -995,6 +1237,7 @@ mod tests {
             use_fee_payer: false,
             use_cospend: false,
             use_temporal_amount: false,
+            use_activation_lineage: false,
             use_burst_copay: false,
             use_burst_coactivity: false,
             use_funder_graph: true,

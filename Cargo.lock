@@ -138,8 +138,10 @@ dependencies = [
  "serde_json",
  "sha2",
  "solana-client",
+ "solana-commitment-config",
  "solana-sdk",
  "solana-system-interface 3.2.0",
+ "url",
 ]
 
 [[package]]

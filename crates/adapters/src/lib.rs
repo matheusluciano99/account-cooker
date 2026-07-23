@@ -105,3 +105,70 @@ pub fn adapter_for(kind: ActionKind) -> Box<dyn ProtocolAdapter> {
         _ => Box::new(TransferAdapter),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+
+    fn account(byte: u8) -> AccountId {
+        AccountId([byte; 32])
+    }
+
+    #[test]
+    fn built_in_adapters_preserve_the_intent_shape() {
+        let ctx = ActionContext {
+            source: account(1),
+            counterparty: account(2),
+            amount: 42_000,
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+
+        for kind in [ActionKind::Transfer, ActionKind::Stake, ActionKind::Swap] {
+            let adapter = adapter_for(kind);
+            assert_eq!(adapter.kind(), kind);
+            let planned = adapter.plan(&ctx, &mut rng);
+            assert_eq!(planned.len(), 1);
+            assert_eq!(planned[0].source, ctx.source);
+            assert_eq!(planned[0].dest, ctx.counterparty);
+            assert_eq!(planned[0].amount, ctx.amount);
+            assert_eq!(planned[0].kind, kind);
+        }
+    }
+
+    #[test]
+    fn memo_is_a_zero_value_self_intent() {
+        let ctx = ActionContext {
+            source: account(1),
+            counterparty: account(2),
+            amount: 42_000,
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let adapter = adapter_for(ActionKind::Memo);
+        let planned = adapter.plan(&ctx, &mut rng);
+
+        assert_eq!(adapter.kind(), ActionKind::Memo);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].source, ctx.source);
+        assert_eq!(planned[0].dest, ctx.source);
+        assert_eq!(planned[0].amount, 0);
+        assert_eq!(planned[0].kind, ActionKind::Memo);
+    }
+
+    #[test]
+    fn internal_value_moves_use_the_transfer_planner() {
+        let ctx = ActionContext {
+            source: account(1),
+            counterparty: account(2),
+            amount: 10,
+        };
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+
+        for kind in [ActionKind::Dust, ActionKind::Consolidate] {
+            let adapter = adapter_for(kind);
+            let planned = adapter.plan(&ctx, &mut rng);
+            assert_eq!(adapter.kind(), ActionKind::Transfer);
+            assert_eq!(planned[0].kind, ActionKind::Transfer);
+        }
+    }
+}

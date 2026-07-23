@@ -114,6 +114,19 @@ pub struct HardeningConfig {
     /// aggregate action rate stays near the per-agent rate (bounds volume and keeps
     /// coincidental cross-operator co-activity low).
     pub hold_aggregate_rate: bool,
+    /// How periodic balance maintenance is represented. Rotating each selected account into
+    /// a fresh successor avoids the permanent many-to-one hub that graph analysis trivially
+    /// clusters. `DirectHub` is retained as an explicit leaky ablation.
+    #[serde(default)]
+    pub rebalance: RebalanceStrategy,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RebalanceStrategy {
+    #[default]
+    RotateAccounts,
+    DirectHub,
 }
 
 impl Default for HardeningConfig {
@@ -124,6 +137,7 @@ impl Default for HardeningConfig {
             sweep_min_sources: 2,
             sweep_max_sources: 3,
             hold_aggregate_rate: true,
+            rebalance: RebalanceStrategy::RotateAccounts,
         }
     }
 }
@@ -299,7 +313,13 @@ pub(crate) fn run_core(st: &mut RunState, sink: &mut dyn DurSink) -> std::io::Re
         }
         let Reverse((best, si)) = st.heap.pop().unwrap();
         let (agent_idx, sub_idx) = (st.sched[si].agent_idx, st.sched[si].sub_idx);
-        st.chain.set_time(best);
+        // `best` is this agent's logical wake time. One wake may expand into several
+        // transactions with intra-action gaps, so another agent can be logically due before
+        // the previous wake's last record. Clamp only the observable chain clock; anchoring
+        // the next wake to that global clock would serialize a large fleet and destroy its
+        // aggregate rate.
+        let observable_at = best.max(st.chain.now());
+        st.chain.set_time(observable_at);
         let before = st.chain.ledger.records.len();
         match sub_idx {
             None => {
@@ -315,19 +335,19 @@ pub(crate) fn run_core(st: &mut RunState, sink: &mut dyn DurSink) -> std::io::Re
                     .persona
                     .circadian
                     .next_delay_secs(sod, &mut st.rng) as i64;
-                st.heap.push(Reverse((best + d.max(1), si)));
+                st.heap.push(Reverse((best.saturating_add(d.max(1)), si)));
             }
             Some(k) => {
                 perform_action_hardened(
                     &mut st.chain,
-                    &st.agents[agent_idx],
+                    &mut st.agents[agent_idx],
                     k,
                     &st.externals,
                     &st.cfg,
                     &mut st.rng,
                 );
                 let phase = st.agents[agent_idx].sub_sched[k].phase;
-                let sod = (best + phase).rem_euclid(86_400) as u64;
+                let sod = best.saturating_add(phase).rem_euclid(86_400) as u64;
                 let mut d = st.agents[agent_idx]
                     .persona
                     .circadian
@@ -335,7 +355,7 @@ pub(crate) fn run_core(st: &mut RunState, sink: &mut dyn DurSink) -> std::io::Re
                 if st.cfg.hardening.hold_aggregate_rate {
                     d *= st.agents[agent_idx].subaccounts.len() as i64;
                 }
-                st.heap.push(Reverse((best + d.max(1), si)));
+                st.heap.push(Reverse((best.saturating_add(d.max(1)), si)));
             }
         }
         sink.on_records(&st.chain.ledger.records[before..])?;
@@ -424,7 +444,7 @@ fn intra_gap(cfg: &SimConfig, rng: &mut ChaCha12Rng) -> i64 {
 /// structure is the occasional `consolidate_sweep`.
 fn perform_action_hardened(
     chain: &mut MockChain,
-    agent: &Agent,
+    agent: &mut Agent,
     sub_idx: usize,
     externals: &[AccountId],
     cfg: &SimConfig,
@@ -433,9 +453,12 @@ fn perform_action_hardened(
     let mut t = chain.now();
     let source = agent.subaccounts[sub_idx]; // one source for the whole wake
 
-    // Occasionally do a genuine internal consolidation instead of an outward action.
+    // Occasionally perform balance maintenance instead of an outward action.
     if rng.random::<f64>() < cfg.hardening.consolidation_prob {
-        consolidate_sweep(chain, agent, &mut t, cfg, rng);
+        match cfg.hardening.rebalance {
+            RebalanceStrategy::RotateAccounts => rotate_accounts(chain, agent, &mut t, cfg, rng),
+            RebalanceStrategy::DirectHub => consolidate_sweep(chain, agent, &mut t, cfg, rng),
+        }
         return;
     }
 
@@ -486,6 +509,54 @@ fn perform_action_hardened(
         chain.record(&tx, fee_payer, Some(agent.id));
     }
     // No external churn here; `consolidate_sweep` is the only rebalance in this path.
+}
+
+/// Move selected subaccounts one-to-one into fresh successor accounts, then make those
+/// successors the active accounts for future wakes. This keeps capital mobile without a
+/// permanent many-to-one hub. The predecessor edge is still public; the Hunter can evolve
+/// activation/lineage heuristics against it, but it no longer gets a privileged hub for free.
+fn rotate_accounts(
+    chain: &mut MockChain,
+    agent: &mut Agent,
+    t: &mut i64,
+    cfg: &SimConfig,
+    rng: &mut ChaCha12Rng,
+) {
+    let n = agent.subaccounts.len();
+    if n < 2 {
+        return;
+    }
+    // Keep index 0 as a stable treasury/funding identity; rotate only operational
+    // subaccounts. This preserves causal funding semantics while avoiding a many-to-one
+    // operational consolidation hub.
+    let available = n - 1;
+    let kmax = cfg.hardening.sweep_max_sources.clamp(1, available);
+    let kmin = cfg.hardening.sweep_min_sources.clamp(1, kmax);
+    let k = if kmin >= kmax {
+        kmax
+    } else {
+        rng.random_range(kmin..=kmax)
+    };
+    let mut idxs: Vec<usize> = (1..n).collect();
+    for i in 0..k {
+        let j = i + rng.random_range(0..(available - i));
+        idxs.swap(i, j);
+    }
+
+    for &sub_idx in idxs.iter().take(k) {
+        let source = agent.subaccounts[sub_idx];
+        let successor = AccountId::random(rng);
+        *t += intra_gap(cfg, rng);
+        chain.set_time(*t);
+        let tx = PlannedTx {
+            source,
+            dest: successor,
+            amount: agent.persona.sample_amount(rng),
+            kind: ActionKind::Transfer,
+        };
+        chain.record(&tx, AccountId::random(rng), Some(agent.id));
+        agent.subaccounts[sub_idx] = successor;
+    }
 }
 
 /// Move value from `k` distinct non-main subaccounts into the operator's hub (`main`), each
@@ -808,6 +879,56 @@ mod tests {
                 (y.ts, y.slot, y.source, y.dest, y.amount)
             );
         }
+    }
+
+    #[test]
+    fn observable_time_never_moves_backwards() {
+        let personas = Persona::presets();
+        for (mode, harden_timing) in [
+            (Mode::Naive, false),
+            (Mode::Curupira, false),
+            (Mode::Curupira, true),
+        ] {
+            let ledger = simulate(
+                &personas,
+                &SimConfig {
+                    mode,
+                    harden_timing,
+                    ..SimConfig::default()
+                },
+            );
+            assert!(
+                ledger
+                    .records
+                    .windows(2)
+                    .all(|pair| pair[0].ts <= pair[1].ts),
+                "{mode:?} harden={harden_timing} emitted a timestamp inversion"
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_activity_scales_with_the_fleet() {
+        let personas = Persona::presets();
+        let run = |num_agents| {
+            simulate(
+                &personas,
+                &SimConfig {
+                    num_agents,
+                    duration_secs: 86_400,
+                    num_external: 400,
+                    ..SimConfig::default()
+                },
+            )
+            .records
+            .len()
+        };
+        let small = run(10);
+        let large = run(100);
+        assert!(
+            large > small * 6,
+            "100-agent activity ({large}) did not scale with 10-agent activity ({small})"
+        );
     }
 
     #[test]

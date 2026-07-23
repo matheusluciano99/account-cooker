@@ -27,8 +27,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: build live feature
-        run: cargo build -p agent-runtime --features live
+        with:
+          components: clippy
+      - name: check every live target
+        run: cargo clippy --workspace --all-targets --features live -- -D warnings
+      - name: test live feature
+        run: cargo test --workspace --features live
+      - name: validate localnet proof script
+        run: bash -n scripts/localnet-live-proof.sh
 
   stress:
     runs-on: ubuntu-latest
