@@ -178,12 +178,15 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> R
     };
 
     // Funding-graph honesty numbers (ground-truth reads are legal in the metric layer). A
-    // funding tx has fee_payer == source (the funder signs its own top-up); real actions have a
-    // throwaway fee_payer != source. The anonymity set = distinct operators per funder.
+    // funding tx is self-signed (fee_payer == source) AND lands on an account that is somewhere a
+    // fee-payer — the same structural signature the funder graph keys on. The `fee_set` test is
+    // what excludes a Naive self-pay (source == main == fee_payer paying an external), which is
+    // not funding. The anonymity set = distinct operators per funder.
+    let fee_set: HashSet<AccountId> = ledger.records.iter().map(|r| r.fee_payer).collect();
     let funding_records = ledger
         .records
         .iter()
-        .filter(|r| r.fee_payer == r.source && r.source != r.dest)
+        .filter(|r| r.fee_payer == r.source && r.source != r.dest && fee_set.contains(&r.dest))
         .count();
     let mut fp_op: HashMap<AccountId, AgentId> = HashMap::new();
     for r in &ledger.records {
@@ -381,6 +384,46 @@ mod tests {
             (r.funder_anonymity_set - 2.0).abs() < 1e-9,
             "one funder hides two operators => anon set 2.0, got {}",
             r.funder_anonymity_set
+        );
+    }
+
+    #[test]
+    fn funding_records_zero_on_naive_self_pay() {
+        // Naive: fee_payer == source == main paying an external is NOT funding — the dest is not
+        // itself a fee-payer, so it must not be miscounted.
+        let (main, ext) = (acc(1), acc(50));
+        let recs = vec![
+            TxRecord {
+                sig: 1,
+                slot: 1,
+                ts: 100,
+                fee_payer: main,
+                source: main,
+                dest: ext,
+                amount: 9,
+                kind: ActionKind::Transfer,
+                operator: Some(0),
+            },
+            TxRecord {
+                sig: 2,
+                slot: 2,
+                ts: 200,
+                fee_payer: main,
+                source: main,
+                dest: ext,
+                amount: 9,
+                kind: ActionKind::Transfer,
+                operator: Some(0),
+            },
+        ];
+        let empty = Clustering {
+            cluster_of: HashMap::new(),
+            sizes: vec![],
+        };
+        let r = evaluate(&Ledger { records: recs }, &empty, 0);
+        assert_eq!(
+            r.funding_records, 0,
+            "naive self-pay must not count as funding"
         );
     }
 
