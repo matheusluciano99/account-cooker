@@ -1,0 +1,49 @@
+name = "market_maker"
+wealth_tier = "mm"
+base_amount_lamports = 50000000
+amount_sigma = 0.4
+num_subaccounts = 6
+
+[circadian]
+hourly_weights = [
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+    0.6,
+]
+actions_per_active_hour = 5.0
+jitter = 0.25
+
+[split]
+min_parts = 2
+max_parts = 5
+min_part_lamports = 500000
+
+[decoy]
+decoys_per_real = 2.5
+dust_lamports_max = 100000
+
+[action_weights]
+memo = 0.1
+swap = 0.6
+transfer = 0.3

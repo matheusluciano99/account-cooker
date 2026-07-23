@@ -1,0 +1,50 @@
+name = "whale"
+wealth_tier = "whale"
+base_amount_lamports = 500000000
+amount_sigma = 0.5
+num_subaccounts = 8
+
+[circadian]
+hourly_weights = [
+    0.05,
+    0.03,
+    0.02,
+    0.02,
+    0.03,
+    0.05,
+    0.15,
+    0.35,
+    0.6,
+    0.8,
+    0.9,
+    0.95,
+    0.85,
+    0.9,
+    0.95,
+    0.9,
+    0.85,
+    0.9,
+    1.0,
+    1.0,
+    0.95,
+    0.7,
+    0.4,
+    0.15,
+]
+actions_per_active_hour = 2.0
+jitter = 0.35
+
+[split]
+min_parts = 3
+max_parts = 6
+min_part_lamports = 1000000
+
+[decoy]
+decoys_per_real = 2.0
+dust_lamports_max = 200000
+
+[action_weights]
+memo = 0.1
+stake = 0.2
+swap = 0.4
+transfer = 0.3
