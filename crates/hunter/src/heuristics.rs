@@ -72,39 +72,28 @@ pub struct AdversaryConfig {
     pub temporal_window_secs: i64,
     pub amount_tolerance_bps: u32,
 
-    // ---- O Cacador v2: burst heuristics ----
-    // These attack the one leak fee-payer rotation cannot hide: Curupira stamps every
-    // record of a single action with an identical `ts`, and every `source` in that
-    // burst is one operator's subaccount. See `burst_groups`.
-    /// H-COPAY: common-destination co-payment (ts+dest keyed, repetition-thresholded).
+    /// H-COPAY: sources paying a common destination in the same group are the same entity.
     pub use_burst_copay: bool,
-    /// Distinct sources in one (ts,dest) bucket for it to count.
+    /// Distinct sources in one (group, dest) bucket for it to count.
     pub copay_min_sources: usize,
     /// A source-pair must co-pay in >= this many distinct buckets before being unioned.
     pub copay_min_shared_buckets: u32,
-    /// H-COACT: whole-burst co-activity (ts keyed, dest-agnostic, repetition-thresholded).
+    /// H-COACT: sources co-active in the same group (dest-agnostic) are the same entity.
     pub use_burst_coactivity: bool,
-    /// A source-pair must co-occur in >= this many distinct bursts before being unioned.
+    /// A source-pair must co-occur in >= this many distinct groups before being unioned.
     pub coactivity_min_shared_bursts: u32,
-    /// Drop any bucket/burst with more distinct sources than this (guards against giant
-    /// same-`ts` collision bursts). Must exceed the largest honest subaccount count.
+    /// Drop any group with more distinct sources than this. Must exceed the largest honest
+    /// subaccount count (whale = 8) so no genuine group is ever dropped.
     pub burst_max_sources: usize,
-    /// Exclude `kind == Dust` when building copay buckets (kind is a public field).
+    /// Exclude `kind == Dust` when building copay buckets.
     pub exclude_dust_from_copay: bool,
-    // ---- ablation-only (default off) ----
-    /// H-BURST ceiling: union every source in a burst with NO repetition threshold.
-    /// Precision-unsafe; present so the ablation table can show the cost of dropping it.
+    /// Ablation only: union every source in a group with no repetition threshold.
     pub use_burst_union_ceiling: bool,
-    /// Optional subtractive guard: require every non-dust part in a copay bucket to be
-    /// >= this floor, else drop the bucket. Can only remove edges, never over-merge.
+    /// Optional subtractive guard: drop a copay bucket that has any non-dust part below
+    /// `split_min_part_floor`. Can only remove edges, never add them.
     pub use_split_shape_guard: bool,
     pub split_min_part_floor: u64,
 
-    // ---- O Cacador v3: windowed grouping ----
-    // The obvious analyst counter-move once the engine jitters timestamps: stop keying on
-    // an EXACT ts and bucket by a time window instead. Off by default so every exact-ts
-    // unit test keeps its semantics; the reporting paths (demo, CLI report, integration
-    // test) opt in via `windowed()`.
     /// Group records by a Δt time window instead of identical-ts bursts.
     pub use_windowed: bool,
     /// Window width in seconds when `use_windowed` (0 = identical-ts, a superset of bursts).
@@ -120,19 +109,16 @@ impl Default for AdversaryConfig {
             temporal_window_secs: 120,
             amount_tolerance_bps: 50,
 
-            // v2 linkers default ON; the ceiling and shape-guard are ablation-only.
             use_burst_copay: true,
             copay_min_sources: 2,
             copay_min_shared_buckets: 2,
             use_burst_coactivity: true,
             coactivity_min_shared_bursts: 3,
-            burst_max_sources: 10, // > whale's 8 subaccounts: no honest burst is ever dropped
+            burst_max_sources: 10,
             exclude_dust_from_copay: true,
             use_burst_union_ceiling: false,
             use_split_shape_guard: false,
             split_min_part_floor: 1_000,
-
-            // Default stays EXACT-TS so existing exact-ts unit tests are unchanged.
             use_windowed: false,
             window_secs: 120,
         }
@@ -140,25 +126,20 @@ impl Default for AdversaryConfig {
 }
 
 impl AdversaryConfig {
-    /// The windowed adversary (v3): the honest headline attack against timing-hardened
-    /// Curupira. It re-buckets by a Δt window instead of an exact ts, AND it drops the
-    /// dest-agnostic co-activity linker: a Δt window mixes many operators (low
-    /// window-purity), so dest-agnostic co-occurrence is just noise and destroys precision
-    /// (measured). What survives precisely is dest-keyed co-payment — above all the
-    /// operator's own consolidation sweeps into a private hub. A higher repetition
-    /// threshold keeps coincidental shared-external co-payments from crossing.
+    /// Groups by a Δt window rather than an exact `ts`. Disables dest-agnostic co-activity
+    /// (a window spans multiple operators, so it would union across them) and raises the
+    /// copay repetition bar, leaving dest-keyed co-payment as the signal.
     pub fn windowed(window_secs: i64) -> Self {
         AdversaryConfig {
             use_windowed: true,
             window_secs,
-            use_burst_coactivity: false, // dest-agnostic co-activity is unsafe under windowing
-            copay_min_shared_buckets: 3, // higher bar: coincidental shared-external pairs stay below it
+            use_burst_coactivity: false,
+            copay_min_shared_buckets: 3,
             ..AdversaryConfig::default()
         }
     }
 
-    /// The exact-ts adversary (v2): identical-ts bursts, copay + co-activity. Named alias
-    /// for the default; it is the straw-man that per-tx timestamp jitter defeats.
+    /// Identical-ts grouping with copay + co-activity. Alias for the default config.
     pub fn exact_ts() -> Self {
         AdversaryConfig::default()
     }
@@ -171,16 +152,13 @@ pub struct Clustering {
 }
 
 /// Group records into bursts: maximal runs that share one `ts` AND are slot-contiguous.
-/// Returns record-index groups (into `records`). Reads ONLY `ts`/`slot` — never `operator`.
+/// Returns record-index groups (into `records`). Reads only `ts`/`slot`, never `operator`.
 ///
-/// Why both conditions: `slot` is a global monotonic +1 counter with no gaps between
-/// actions, so slot-contiguity alone would silently chain unrelated operators. Anchoring
-/// on identical `ts` is what delimits a single action; slot-contiguity is only an extra
-/// guard. The lone residual is two agents scheduled on the same integer second — a
-/// collision the downstream repetition thresholds and size cap are built to survive.
+/// Both conditions are required: `slot` is a global +1 counter with no gaps, so contiguity
+/// alone would chain unrelated records; the identical-`ts` anchor is what delimits a group.
 pub(crate) fn burst_groups(records: &[TxRecord]) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..records.len()).collect();
-    order.sort_by_key(|&i| records[i].slot); // defensive; records are already in slot order
+    order.sort_by_key(|&i| records[i].slot); // records are already in slot order; sort defensively
     let mut groups = Vec::new();
     let mut i = 0;
     while i < order.len() {
@@ -198,21 +176,12 @@ pub(crate) fn burst_groups(records: &[TxRecord]) -> Vec<Vec<usize>> {
     groups
 }
 
-/// Disjoint time-window grouping (v3). Sort by (ts, slot, sig); open a window at the first
+/// Disjoint time-window grouping. Sort by (ts, slot, sig); open a window at the first
 /// unassigned record and absorb every following record with `ts <= start_ts + window_secs`,
-/// then start a fresh window. Reads ONLY ts/slot/sig — never `operator`.
+/// then start a fresh window. Reads only ts/slot/sig, never `operator`.
 ///
-/// - `window_secs == 0` groups records with IDENTICAL ts (a SUPERSET of `burst_groups`,
-///   since it drops the slot-contiguity cut) — the monotone base case.
-/// - `window_secs > 0` is a bounded relaxation, monotone in `window_secs` (a wider window
-///   groups a superset of pairs). This is what re-buckets a timestamp-jittered sweep whose
-///   records the engine deliberately spread across distinct seconds.
-///
-/// NOTE: we deliberately do NOT add a ts-agnostic "slot run" heuristic. `MockChain.slot` is
-/// a gapless global +1 counter, so slot-contiguity can never delimit one operator's action
-/// (the whole ledger is one contiguous run); such a heuristic degenerates to a single
-/// oversized group dropped by `burst_max_sources`, and it is not a realistic real-chain
-/// signal. The honest generalization of exact-ts on this ledger is the time window.
+/// `window_secs == 0` groups records with identical `ts` (a superset of `burst_groups`);
+/// a larger window groups a superset of pairs, monotone in `window_secs`.
 pub(crate) fn window_groups(records: &[TxRecord], window_secs: i64) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..records.len()).collect();
     order.sort_by_key(|&i| (records[i].ts, records[i].slot, records[i].sig));
@@ -362,21 +331,17 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
         }
     }
 
-    // ===== O Cacador burst / window heuristics =====
-    // The leak: legacy Curupira emits a whole action under ONE clock, so every split part /
-    // decoy / rebalance shares an IDENTICAL `ts` and lands in one group, all from one
-    // operator's subaccounts. Fee-payer rotation is invisible to a ts-keyed view. Pick the
-    // grouping ONCE — exact-ts bursts (v2) or Δt windows (v3, the honest counter to per-tx
-    // timing jitter) — then feed the same thresholded copay/coact linkers. Repetition
-    // thresholds + `burst_max_sources` bound false positives in both modes.
+    // Group records once (identical-ts bursts or Δt windows), then run the thresholded
+    // copay/coact linkers over the groups. Repetition thresholds and `burst_max_sources`
+    // bound false positives.
     let groups = if cfg.use_windowed {
         window_groups(&ledger.records, cfg.window_secs)
     } else {
         burst_groups(&ledger.records)
     };
 
-    // (4) H-COPAY: common-destination co-payment. A source-pair sharing a (group, dest)
-    // bucket in >= copay_min_shared_buckets groups is one entity.
+    // (4) Common-destination co-payment: sources sharing a (group, dest) bucket in
+    // >= copay_min_shared_buckets groups are unioned.
     if cfg.use_burst_copay {
         for (&(a, b), &w) in &copay_edges(&groups, &ledger.records, cfg) {
             if w >= cfg.copay_min_shared_buckets {
@@ -385,9 +350,8 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
         }
     }
 
-    // (5) H-COACT: whole-group co-activity (dest-agnostic). A source-pair co-present in
-    // >= coactivity_min_shared_bursts groups is one entity. Catches decoy-only / cross-dest
-    // / rebalance pairs H-COPAY misses.
+    // (5) Whole-group co-activity (dest-agnostic): sources co-present in
+    // >= coactivity_min_shared_bursts groups are unioned. Catches cross-dest / dust-only pairs.
     if cfg.use_burst_coactivity {
         for (&(a, b), &w) in &coact_edges(&groups, &ledger.records, cfg) {
             if w >= cfg.coactivity_min_shared_bursts {
@@ -396,10 +360,7 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
         }
     }
 
-    // (6) H-BURST ceiling (ablation only, default OFF): union every source in a group with
-    // no repetition threshold. Recall ceiling / precision floor — one collision permanently
-    // fuses two operators. Present only so the ablation can show that pushing F1 higher
-    // costs precision. Never enabled in `Default`.
+    // (6) Ablation only: union every source in a group with no repetition threshold.
     if cfg.use_burst_union_ceiling {
         for group in &groups {
             let mut srcs: BTreeSet<AccountId> = BTreeSet::new();
@@ -779,8 +740,8 @@ mod tests {
 
     #[test]
     fn windowed_copay_catches_jittered_sweep() {
-        // The CORE claim. A consolidation sweep to `hub` at jittered-but-nearby ts: exact-ts
-        // sees singletons and MISSES it; a 120s window regroups and CATCHES it.
+        // A sweep to `hub` at nearby-but-distinct ts: exact-ts sees singletons; a 120s
+        // window regroups them into one bucket.
         let (s1, s2, hub) = (acc(1), acc(2), acc(9));
         let recs = vec![
             rec(1, 1, 100, s1, hub, 1_000_000, Transfer),
@@ -796,8 +757,8 @@ mod tests {
 
     #[test]
     fn windowed_copay_shared_external_no_false_union() {
-        // opA and opB both repeatedly pay the SAME external D, but in their OWN windows.
-        // Windowing must NOT merge the two operators (the 40-pool trap, under Δt).
+        // Two operators pay the same external `d`, but in separate windows. Windowing must
+        // not merge them.
         let (s1, s1b, s2, s2b, d) = (acc(1), acc(2), acc(3), acc(4), acc(20));
         let recs = vec![
             rec(1, 1, 100, s1, d, 1_000_000, Transfer),

@@ -98,8 +98,7 @@ fn base_cfg(agents: usize, days: i64, seed: u64) -> SimConfig {
 fn demo(agents: usize, days: i64, seed: u64) -> Result<()> {
     let personas = Persona::presets();
     let base = base_cfg(agents, days, seed);
-    // Three ledgers: sloppy baseline, timing-hardened Curupira (default), and legacy
-    // (un-hardened) Curupira — the guardrail proving the adversary still has teeth.
+    // Three ledgers: naive baseline, hardened Curupira (default), and legacy (un-hardened).
     let naive = simulate(&personas, &SimConfig { mode: Mode::Naive, ..base.clone() });
     let hardened = simulate(
         &personas,
@@ -155,9 +154,8 @@ fn demo(agents: usize, days: i64, seed: u64) -> Result<()> {
     Ok(())
 }
 
-/// The honesty artifact: sweep the windowed adversary's width against the hardened ledger.
-/// Shows exact-ts (window 0) is defeated, a widening window recovers a small residual, and
-/// precision holds because the swept hub is operator-private — the honest attack ceiling.
+/// Sweep the windowed adversary's width against the hardened ledger and print F1 /
+/// precision / recall / window-purity at each width.
 fn ablation(hardened: &Ledger) {
     println!();
     println!("  O Cacador window sweep on hardened Curupira (the honest arms race):");
@@ -193,8 +191,8 @@ fn row3(label: &str, a: f64, b: f64, c: f64, fmt: Fmt) {
     println!("  {label:<24}{:>10}{:>10}{:>10}", f(a), f(b), f(c));
 }
 
-/// Headline verdict: measured against the windowed analyst on the HARDENED ledger. Only
-/// claims a win if attribution actually fell, stayed nonzero, and stayed honest.
+/// Print the verdict. Claims a win only if attribution fell, stayed nonzero, and stayed
+/// honest (precision >= 0.80, no cluster collapse).
 fn verdict(naive_w: &Report, hardened_w: &Report, hardened_x: &Report) {
     let helped = hardened_w.attribution_f1 + 0.05 < naive_w.attribution_f1
         && hardened_w.attribution_f1 > 0.0
@@ -245,7 +243,7 @@ fn dump(mode: &str, agents: usize, days: i64, seed: u64, out: &str) -> Result<()
 fn report(path: &str) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
     let ledger: Ledger = serde_json::from_str(&raw).context("parsing ledger JSON")?;
-    // Score with the honest headline adversary (windowed v3), not the exact-ts straw-man.
+    // Score with the windowed adversary.
     let (_, r) = analyze(&ledger, &AdversaryConfig::windowed(120));
     println!("{}", serde_json::to_string_pretty(&r)?);
     Ok(())

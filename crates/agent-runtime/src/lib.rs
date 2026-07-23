@@ -84,25 +84,24 @@ pub struct SimConfig {
     pub seed: u64,
     pub num_external: usize,
     /// Curupira-only: enable timing hardening (per-subaccount decorrelated scheduling,
-    /// single-source actions, per-record ts jitter). `false` = legacy Curupira, whose
-    /// ledger is byte-identical to the pre-hardening engine. No effect on `Mode::Naive`.
+    /// single-source actions, per-record ts jitter). `false` = legacy Curupira (single
+    /// agent clock, whole action stamped at one ts). No effect on `Mode::Naive`.
     pub harden_timing: bool,
     pub hardening: HardeningConfig,
 }
 
-/// Tunables for the hardened Curupira path. See the hardening spec.
+/// Tunables for the hardened Curupira path.
 #[derive(Clone, Debug)]
 pub struct HardeningConfig {
     /// Mean seconds between consecutive records within one wake (exponential, min 1s).
     pub intra_gap_mean_secs: f64,
-    /// Per-wake probability of a genuine internal consolidation sweep (the honest residual
-    /// a windowed adversary can partially recover — this is what keeps F1 > 0).
+    /// Per-wake probability of a genuine internal consolidation sweep.
     pub consolidation_prob: f64,
     pub sweep_min_sources: usize,
     pub sweep_max_sources: usize,
-    /// Scale each subaccount's delay by the agent's subaccount count so the operator's
-    /// AGGREGATE action rate ~= the legacy per-agent rate (holds volume/runtime down and
-    /// keeps coincidental cross-operator co-activity low). Required for the honest bands.
+    /// Scale each subaccount's delay by the agent's subaccount count so an operator's
+    /// aggregate action rate stays near the per-agent rate (bounds volume and keeps
+    /// coincidental cross-operator co-activity low).
     pub hold_aggregate_rate: bool,
 }
 
@@ -157,10 +156,8 @@ struct Sched {
 
 /// Run the simulation and return the observable ledger.
 ///
-/// `Mode::Naive` and legacy Curupira (`harden_timing == false`) go through the ORIGINAL
-/// `perform_action` path with the original RNG draw order, so their ledgers are byte-for-
-/// byte reproducible against the pre-hardening engine. Hardened Curupira takes the
-/// per-subaccount path (`perform_action_hardened`).
+/// `Mode::Naive` and legacy Curupira (`harden_timing == false`) use the single-clock
+/// `perform_action` path; hardened Curupira uses the per-subaccount `perform_action_hardened`.
 pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
     assert!(!personas.is_empty(), "need at least one persona");
     let mut rng = StdRng::seed_from_u64(cfg.seed ^ (cfg.mode as u64).wrapping_mul(0x9E3779B9));
@@ -175,15 +172,14 @@ pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
     for id in 0..cfg.num_agents {
         let persona = personas[id % personas.len()].clone();
         let n = persona.num_subaccounts.max(1);
-        // Draw subaccount ids EXACTLY as before, so hardened shares legacy's ids for the
-        // same seed (RNG streams diverge only at the next draw).
+        // Draw subaccount ids before branching, so both paths share ids for a given seed.
         let subaccounts: Vec<AccountId> = (0..n).map(|_| AccountId::random(&mut rng)).collect();
         let main = subaccounts[0];
         let agent_idx = agents.len();
         let mut sub_sched = Vec::new();
 
         if !hardened {
-            // naive / legacy — identical to the pre-hardening engine (one agent clock).
+            // naive / legacy — single agent clock.
             let sod = cfg.start_ts.rem_euclid(86_400) as u64;
             let d = persona.circadian.next_delay_secs(sod, &mut rng) as i64;
             sched.push(Sched {
@@ -222,9 +218,8 @@ pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
     let mut chain = MockChain::new(cfg.start_ts);
     let end = cfg.start_ts + cfg.duration_secs;
 
-    // Discrete-event loop over scheduler entries. Strict `<` picks the first minimum, so
-    // for naive/legacy (one entry per agent, in agent order) the pick sequence — and thus
-    // the RNG draw order — is identical to the original agent-scan loop.
+    // Discrete-event loop: always advance the earliest-scheduled entry. Strict `<` picks
+    // the first minimum, keeping the pick order (and RNG draw order) deterministic.
     loop {
         let (mut pick, mut best) = (None, i64::MAX);
         for (i, s) in sched.iter().enumerate() {
@@ -317,11 +312,9 @@ fn intra_gap(cfg: &SimConfig, rng: &mut StdRng) -> i64 {
     (-u.ln() * mean).max(1.0) as i64
 }
 
-/// The hardened Curupira action. Unlike `perform_action`, a wake belongs to ONE subaccount
-/// (`sub_idx`), every record gets its OWN jittered timestamp, and decoys ride the same
-/// source. This deletes the same-ts, multi-source fan-out entirely — a windowed adversary
-/// finds only single-source groups from normal activity. The ONLY same-operator structure
-/// left is the rare genuine consolidation sweep (`consolidate_sweep`), the honest residual.
+/// A hardened wake: one subaccount acts, each record gets its own jittered timestamp, and
+/// decoys use the same source. Normal activity is single-source; the only multi-source
+/// structure is the occasional `consolidate_sweep`.
 fn perform_action_hardened(
     chain: &mut MockChain,
     agent: &Agent,
@@ -330,10 +323,10 @@ fn perform_action_hardened(
     cfg: &SimConfig,
     rng: &mut StdRng,
 ) {
-    let mut t = chain.now(); // == best
-    let source = agent.subaccounts[sub_idx]; // PINNED for the whole wake
+    let mut t = chain.now();
+    let source = agent.subaccounts[sub_idx]; // one source for the whole wake
 
-    // (first draw) rare honest residual: a genuine internal consolidation to the hub.
+    // Occasionally do a genuine internal consolidation instead of an outward action.
     if rng.random::<f64>() < cfg.hardening.consolidation_prob {
         consolidate_sweep(chain, agent, &mut t, cfg, rng);
         return;
@@ -360,7 +353,7 @@ fn perform_action_hardened(
             chain.set_time(t);
             let fee_payer = AccountId::random(rng);
             let tx = PlannedTx {
-                source, // SAME source for every part — no multi-source fan-out
+                source, // same source for every part
                 dest: planned.dest,
                 amount: part,
                 kind: planned.kind,
@@ -369,7 +362,7 @@ fn perform_action_hardened(
         }
     }
 
-    // Decoys ride the SAME acting subaccount (kills the decoy-only co-activity leak).
+    // Decoys use the same acting subaccount.
     let ndec = agent.persona.decoy.num_decoys(rng);
     for _ in 0..ndec {
         t += intra_gap(cfg, rng);
@@ -385,15 +378,11 @@ fn perform_action_hardened(
         };
         chain.record(&tx, fee_payer, Some(agent.id));
     }
-    // No external churn in the hardened path: the consolidation sweep is the rebalance
-    // analog, and external churn (a fresh dest) was always scoring-inert.
+    // No external churn here; `consolidate_sweep` is the only rebalance in this path.
 }
 
-/// A genuine internal consolidation: move value from `k` distinct non-main subaccounts to
-/// the operator's private hub (`main`), at jittered distinct timestamps inside a short
-/// spread. This is the honest residual: exact-ts sees `k` singletons and misses it; a
-/// windowed adversary regroups the spread and recovers it — every recovered link real,
-/// because the hub is operator-private, so precision stays high while recall stays low.
+/// Move value from `k` distinct non-main subaccounts into the operator's hub (`main`), each
+/// at its own jittered timestamp within a short spread.
 fn consolidate_sweep(
     chain: &mut MockChain,
     agent: &Agent,
@@ -430,7 +419,7 @@ fn consolidate_sweep(
             source: src,
             dest: target,
             amount,
-            kind: ActionKind::Transfer, // NOT Consolidate: v1 cospend must not trivially harvest it
+            kind: ActionKind::Transfer,
         };
         chain.record(&tx, fee_payer, Some(agent.id));
     }
@@ -450,15 +439,8 @@ fn emit_with_noise(
         Mode::Naive => {
             chain.record(p, agent.main, Some(agent.id));
         }
-        // Curupira: split the value into non-obvious parts and pay each with a FRESH
+        // Curupira: split the value into non-obvious parts and pay each with a fresh
         // throwaway fee-payer, from a rotating source. No stable fee-payer to cluster on.
-        //
-        // TODO(harden-timing): every part below is recorded under the SAME `chain.clock`
-        // (set once per action in `simulate`), so all parts share one `ts` and land in a
-        // single burst — which O Cacador v2's H-COPAY/H-COACT reconstruct with F1~1.0.
-        // Fee-payer rotation is useless against this. To actually defeat v2, advance the
-        // clock by a jittered gap between parts/decoys (and decorrelate per-subaccount
-        // timing instead of one circadian clock per agent). See the hunter burst heuristics.
         Mode::Curupira => {
             let parts = noise_core::split::split_amount(p.amount, &agent.persona.split, rng);
             let parts = if parts.is_empty() {
@@ -570,8 +552,8 @@ mod tests {
         (naive, hardened, legacy)
     }
 
-    /// The pre-registered honest before/after. Band SHAPES are fixed; only the engine
-    /// tuning constant `consolidation_prob` could move the residual, and it lands at ~0.14.
+    /// Naive and legacy Curupira stay fully de-anonymized under both adversaries; hardened
+    /// Curupira drops to a low, nonzero F1 at high precision against the windowed adversary.
     #[test]
     fn honest_arms_race_after_hardening() {
         let (naive, hardened, legacy) = arms_race_ledgers();
@@ -585,32 +567,26 @@ mod tests {
         let (_, h_exact) = analyze(&hardened, &exact);
         let (_, l_exact) = analyze(&legacy, &exact);
 
-        // (a) NAIVE is fully recovered by BOTH adversaries (static fee-payer + consolidate).
+        // Naive is fully recovered by both adversaries.
         assert!(n_exact.attribution_f1 > 0.9, "naive exact f1 {}", n_exact.attribution_f1);
         assert!(n_win.attribution_f1 > 0.9, "naive windowed f1 {}", n_win.attribution_f1);
 
-        // (b) TEETH: the windowed adversary STILL fully de-anonymizes LEGACY (un-hardened)
-        //     Curupira, at high precision. So a low hardened F1 is the hardening's doing,
-        //     not a crippled adversary.
+        // The windowed adversary still fully de-anonymizes legacy Curupira at high precision.
         assert!(l_win.attribution_f1 > 0.9, "legacy windowed f1 {}", l_win.attribution_f1);
         assert!(l_win.attribution_precision > 0.9, "legacy windowed prec {}", l_win.attribution_precision);
         assert!(l_exact.attribution_f1 > 0.9, "legacy exact f1 {}", l_exact.attribution_f1);
 
-        // (c) DOCUMENTED straw-man (NOT the claim): exact-ts collapses on hardened because
-        //     the same-ts fan-out is structurally gone. Expected; not the privacy result.
-        assert!(h_exact.attribution_f1 < 0.3, "hardened exact f1 {} (straw-man)", h_exact.attribution_f1);
+        // Exact-ts collapses on hardened Curupira (no same-ts fan-out to key on).
+        assert!(h_exact.attribution_f1 < 0.3, "hardened exact f1 {}", h_exact.attribution_f1);
 
-        // (d) THE CLAIM — against the windowed analyst, hardened Curupira:
-        //     nonzero (a genuine consolidation residual survives — noise is not magic)...
+        // Windowed vs hardened: nonzero, clearly below naive, at high precision, no collapse.
         assert!(h_win.attribution_f1 > 0.0, "residual must be nonzero, got {}", h_win.attribution_f1);
-        //     ...clearly below naive (noise helps: pre-registered gap > 0.30)...
         assert!(
             h_win.attribution_f1 < n_win.attribution_f1 - 0.30,
             "gap to naive too small: hardened {} vs naive {}",
             h_win.attribution_f1,
             n_win.attribution_f1
         );
-        //     ...and HONEST: the residual links are real (high precision), no collapse.
         assert!(
             h_win.attribution_precision >= 0.80,
             "windowed hardened precision {} — that would be dishonest over-merge",

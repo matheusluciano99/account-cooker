@@ -25,25 +25,20 @@ pub struct Report {
     /// across. 1.0 = fully de-anonymized; higher = the adversary can't tell your
     /// accounts are one entity. HIGHER = better privacy.
     pub fragmentation: f64,
-    /// Pairwise precision over owned accounts. The honesty counterweight to F1: HIGH means
-    /// the adversary's links are real, not a trivial over-merge. A privacy tool cannot brag
-    /// about a low F1 that was only achieved by the adversary collapsing everything.
+    /// Pairwise precision over owned accounts. HIGHER = the adversary's links are real
+    /// rather than a trivial over-merge.
     pub attribution_precision: f64,
     /// Fraction of within-burst owned-source pairs that are truly same-operator (pooled,
-    /// pair-weighted). A property of the LEDGER, not the clustering: it is the upper bound
-    /// on how honest any burst-based heuristic can be. 1.0 = bursts are pure (no same-second
-    /// collisions between operators); lower = the data itself caps achievable precision.
+    /// pair-weighted). A property of the ledger: 1.0 = bursts are pure; lower caps the
+    /// precision any burst-based heuristic can reach.
     pub burst_purity: f64,
-    /// Largest share of owned accounts landing in any single predicted cluster. A
-    /// trivial-collapse alarm: near 1.0 means the adversary fused the whole fleet into one
-    /// blob (cheap, dishonest); small means genuinely separated inferences.
+    /// Largest share of owned accounts in any single predicted cluster. Near 1.0 = the
+    /// adversary collapsed the fleet into one cluster.
     pub largest_cluster_frac: f64,
-    /// Like `burst_purity` but over Δt WINDOWS at `window_secs`. On timing-hardened Curupira
-    /// the exact-ts `burst_purity` is ~1.0 only because bursts are singletons (misleading);
-    /// this is the honest upper bound on the precision a windowed adversary can achieve.
+    /// Like `burst_purity` but over Δt windows at `window_secs`: the upper bound on the
+    /// precision a windowed adversary can reach.
     pub window_purity: f64,
-    /// The window width this report was scored at (0 for exact-ts configs). Lets a reader
-    /// see which adversary produced these numbers.
+    /// The window width this report was scored at (0 for identical-ts configs).
     pub window_secs: i64,
 }
 
@@ -124,9 +119,8 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> R
         owned_per_cluster.values().copied().max().unwrap_or(0) as f64 / accounts.len() as f64
     };
 
-    // Burst purity — a property of the ledger. Uses the SAME burst definition the
-    // heuristics do (which reads only ts/slot); the `operator` peek here is legal because
-    // this is the scoring layer, not a heuristic.
+    // Burst purity: reuse `burst_groups` (ts/slot only) and read `operator` — allowed here
+    // in the scoring layer, never in a heuristic.
     let (mut pure_pairs, mut total_pairs) = (0u64, 0u64);
     for burst in crate::heuristics::burst_groups(&ledger.records) {
         let mut seen = HashSet::new();
@@ -154,7 +148,7 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> R
         1.0
     };
 
-    // Window purity — same idea over Δt windows (the honest ceiling under jittered timing).
+    // Window purity — the same measure over Δt windows.
     let (mut pure_w, mut total_w) = (0u64, 0u64);
     for group in crate::heuristics::window_groups(&ledger.records, window_secs) {
         let mut seen = HashSet::new();
