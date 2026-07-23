@@ -13,9 +13,11 @@ pub use heuristics::{cluster, AdversaryConfig, Clustering};
 pub use metric::{evaluate, Report};
 pub use model::{AgentId, Ledger, TxRecord};
 
-/// Convenience: cluster a ledger and score it in one call.
+/// Convenience: cluster a ledger and score it in one call. The report's `window_purity` is
+/// measured at the adversary's window (0 for exact-ts configs).
 pub fn analyze(ledger: &Ledger, cfg: &AdversaryConfig) -> (Clustering, Report) {
     let clustering = cluster(ledger, cfg);
-    let report = evaluate(ledger, &clustering);
+    let win = if cfg.use_windowed { cfg.window_secs } else { 0 };
+    let report = evaluate(ledger, &clustering, win);
     (clustering, report)
 }

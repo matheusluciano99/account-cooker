@@ -38,10 +38,18 @@ pub struct Report {
     /// trivial-collapse alarm: near 1.0 means the adversary fused the whole fleet into one
     /// blob (cheap, dishonest); small means genuinely separated inferences.
     pub largest_cluster_frac: f64,
+    /// Like `burst_purity` but over Δt WINDOWS at `window_secs`. On timing-hardened Curupira
+    /// the exact-ts `burst_purity` is ~1.0 only because bursts are singletons (misleading);
+    /// this is the honest upper bound on the precision a windowed adversary can achieve.
+    pub window_purity: f64,
+    /// The window width this report was scored at (0 for exact-ts configs). Lets a reader
+    /// see which adversary produced these numbers.
+    pub window_secs: i64,
 }
 
-/// Score a clustering against the ledger's ground truth.
-pub fn evaluate(ledger: &Ledger, clustering: &Clustering) -> Report {
+/// Score a clustering against the ledger's ground truth. `window_secs` selects the window
+/// used for `window_purity` (0 = identical-ts); it does not affect the clustering itself.
+pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> Report {
     let owner = ledger.ownership();
     let accounts: Vec<AccountId> = owner.keys().copied().collect();
 
@@ -146,6 +154,34 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering) -> Report {
         1.0
     };
 
+    // Window purity — same idea over Δt windows (the honest ceiling under jittered timing).
+    let (mut pure_w, mut total_w) = (0u64, 0u64);
+    for group in crate::heuristics::window_groups(&ledger.records, window_secs) {
+        let mut seen = HashSet::new();
+        let mut ops: Vec<AgentId> = Vec::new();
+        for &ix in &group {
+            let r = &ledger.records[ix];
+            if let Some(op) = r.operator {
+                if seen.insert(r.source) {
+                    ops.push(op);
+                }
+            }
+        }
+        for i in 0..ops.len() {
+            for j in (i + 1)..ops.len() {
+                total_w += 1;
+                if ops[i] == ops[j] {
+                    pure_w += 1;
+                }
+            }
+        }
+    }
+    let window_purity = if total_w > 0 {
+        pure_w as f64 / total_w as f64
+    } else {
+        1.0
+    };
+
     Report {
         num_accounts: ledger.accounts().len(),
         owned_accounts: accounts.len(),
@@ -156,6 +192,8 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering) -> Report {
         attribution_precision: precision,
         burst_purity,
         largest_cluster_frac,
+        window_purity,
+        window_secs,
     }
 }
 
@@ -202,7 +240,7 @@ mod tests {
             cluster_of,
             sizes: vec![3],
         };
-        let r = evaluate(&ledger, &cl);
+        let r = evaluate(&ledger, &cl, 0);
         assert!((r.attribution_precision - 1.0 / 3.0).abs() < 1e-9);
         assert!((r.largest_cluster_frac - 1.0).abs() < 1e-9, "collapse alarm should be 1.0");
     }
@@ -225,7 +263,7 @@ mod tests {
             cluster_of,
             sizes: vec![1, 1, 1],
         };
-        let r = evaluate(&ledger, &cl);
+        let r = evaluate(&ledger, &cl, 0);
         assert!((r.largest_cluster_frac - 1.0 / 3.0).abs() < 1e-9);
     }
 
@@ -240,12 +278,32 @@ mod tests {
             cluster_of: HashMap::new(),
             sizes: vec![],
         };
-        assert!((evaluate(&pure, &empty).burst_purity - 1.0).abs() < 1e-9);
+        assert!((evaluate(&pure, &empty, 0).burst_purity - 1.0).abs() < 1e-9);
 
         // Contaminated: one burst spans two operators (a same-second collision).
         let contaminated = Ledger {
             records: vec![owned(1, 1, 100, a, 0), owned(2, 2, 100, b, 1)],
         };
-        assert!(evaluate(&contaminated, &empty).burst_purity < 1.0);
+        assert!(evaluate(&contaminated, &empty, 0).burst_purity < 1.0);
+    }
+
+    #[test]
+    fn window_purity_reflects_grouping() {
+        // Two operators act at ts 100 and 160 — DIFFERENT seconds, so exact-ts bursts are
+        // pure singletons (burst_purity == 1.0), but a 120s window merges them.
+        let (a, b) = (acc(1), acc(2));
+        let ledger = Ledger {
+            records: vec![owned(1, 1, 100, a, 0), owned(2, 2, 160, b, 1)],
+        };
+        let empty = Clustering {
+            cluster_of: HashMap::new(),
+            sizes: vec![],
+        };
+        let r0 = evaluate(&ledger, &empty, 0);
+        assert!((r0.burst_purity - 1.0).abs() < 1e-9, "exact-ts bursts are singletons");
+        assert!((r0.window_purity - 1.0).abs() < 1e-9, "window 0 == identical-ts, still pure");
+        let r120 = evaluate(&ledger, &empty, 120);
+        assert!(r120.window_purity < 1.0, "120s window merges the two operators");
+        assert_eq!(r120.window_secs, 120);
     }
 }
