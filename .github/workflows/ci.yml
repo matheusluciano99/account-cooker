@@ -29,3 +29,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: build live feature
         run: cargo build -p agent-runtime --features live
+
+  stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Heavy #[ignore] tests: the scale benchmark and the real SIGKILL crash-recovery proof.
+      - name: scale + crash-recovery
+        run: cargo test --all --release -- --ignored

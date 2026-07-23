@@ -166,8 +166,7 @@ pub(crate) fn burst_groups(records: &[TxRecord]) -> Vec<Vec<usize>> {
         let ts0 = records[order[i]].ts;
         let mut prev = records[order[i]].slot;
         i += 1;
-        while i < order.len() && records[order[i]].ts == ts0 && records[order[i]].slot == prev + 1
-        {
+        while i < order.len() && records[order[i]].ts == ts0 && records[order[i]].slot == prev + 1 {
             prev = records[order[i]].slot;
             i += 1;
         }
@@ -216,7 +215,9 @@ fn copay_edges(
             if cfg.exclude_dust_from_copay && r.kind == ActionKind::Dust {
                 continue;
             }
-            let e = by_dest.entry(r.dest).or_insert_with(|| (BTreeSet::new(), false));
+            let e = by_dest
+                .entry(r.dest)
+                .or_insert_with(|| (BTreeSet::new(), false));
             e.0.insert(r.source);
             if r.amount < cfg.split_min_part_floor {
                 e.1 = true;
@@ -486,7 +487,10 @@ mod tests {
             rec(4, 4, 200, s2, d, 1_000_000, Transfer),
         ];
         let cl = cluster(&led(recs), &only(true, false, false));
-        assert!(same(&cl, s1, s2), "two shared (ts,dest) buckets should union");
+        assert!(
+            same(&cl, s1, s2),
+            "two shared (ts,dest) buckets should union"
+        );
     }
 
     #[test]
@@ -538,7 +542,10 @@ mod tests {
             }
         }
         let cl = cluster(&led(recs), &only(true, false, false));
-        assert!(!same(&cl, acc(1), acc(2)), "oversized bucket must be dropped");
+        assert!(
+            !same(&cl, acc(1), acc(2)),
+            "oversized bucket must be dropped"
+        );
     }
 
     #[test]
@@ -554,7 +561,10 @@ mod tests {
         ];
         let cl = cluster(&led(recs), &only(true, false, false));
         assert!(same(&cl, s1, s2), "real parts co-pay");
-        assert!(!same(&cl, s1, s3), "dust source must be excluded from copay");
+        assert!(
+            !same(&cl, s1, s3),
+            "dust source must be excluded from copay"
+        );
     }
 
     #[test]
@@ -595,7 +605,10 @@ mod tests {
             recs.push(rec(sig, sig, ts, s3, d3, 5_000, Dust));
         }
         let cl = cluster(&led(recs), &only(false, true, false));
-        assert!(same(&cl, s1, s3), "a decoy-only subaccount still leaks via co-activity");
+        assert!(
+            same(&cl, s1, s3),
+            "a decoy-only subaccount still leaks via co-activity"
+        );
     }
 
     #[test]
@@ -607,7 +620,10 @@ mod tests {
             rec(2, 2, 100, s2, d2, 1_000_000, Transfer),
         ];
         let cl = cluster(&led(recs), &only(false, true, false));
-        assert!(!same(&cl, s1, s2), "a single collision must not fuse operators");
+        assert!(
+            !same(&cl, s1, s2),
+            "a single collision must not fuse operators"
+        );
     }
 
     #[test]
@@ -631,7 +647,10 @@ mod tests {
             rec(2, 2, 100, s2, d, 1_000_000, Transfer),
         ];
         let cl = cluster(&led(recs), &only(false, false, true));
-        assert!(same(&cl, s1, s2), "ceiling unions a single burst (precision cost)");
+        assert!(
+            same(&cl, s1, s2),
+            "ceiling unions a single burst (precision cost)"
+        );
     }
 
     #[test]
@@ -656,7 +675,11 @@ mod tests {
             rec(3, 3, 100, z, z, 0, Transfer),
         ];
         let g = burst_groups(&recs);
-        assert_eq!(g.len(), 1, "same-ts collision stays one burst (the known residual)");
+        assert_eq!(
+            g.len(),
+            1,
+            "same-ts collision stays one burst (the known residual)"
+        );
         assert_eq!(g[0].len(), 3);
     }
 
@@ -704,7 +727,11 @@ mod tests {
             rec(2, 2, 150, z, z, 0, Transfer),
             rec(3, 3, 200, z, z, 0, Transfer),
         ];
-        assert_eq!(window_groups(&recs, 120).len(), 1, "all within 120s of the first");
+        assert_eq!(
+            window_groups(&recs, 120).len(),
+            1,
+            "all within 120s of the first"
+        );
         assert_eq!(window_groups(&recs, 40).len(), 3, "40s window splits each");
     }
 
@@ -717,7 +744,11 @@ mod tests {
             rec(3, 3, 200, z, z, 0, Transfer),
             rec(4, 4, 200, z, z, 0, Transfer),
         ];
-        assert_eq!(window_groups(&recs, 0).len(), 2, "window 0 groups identical ts");
+        assert_eq!(
+            window_groups(&recs, 0).len(),
+            2,
+            "window 0 groups identical ts"
+        );
     }
 
     #[test]
@@ -733,7 +764,10 @@ mod tests {
         let burst = pairs_of(&burst_groups(&recs), &recs);
         let w0 = pairs_of(&window_groups(&recs, 0), &recs);
         let w120 = pairs_of(&window_groups(&recs, 120), &recs);
-        assert!(burst.is_subset(&w0), "window(0) must subsume exact-ts bursts");
+        assert!(
+            burst.is_subset(&w0),
+            "window(0) must subsume exact-ts bursts"
+        );
         assert!(w0.is_subset(&w120), "wider window must subsume narrower");
     }
 
@@ -747,7 +781,10 @@ mod tests {
         ];
         let mut shuffled = recs.clone();
         shuffled.reverse(); // any reordering; grouping keys off (ts,slot,sig), not position
-        assert_eq!(pairs_of(&window_groups(&recs, 120), &recs), pairs_of(&window_groups(&shuffled, 120), &shuffled));
+        assert_eq!(
+            pairs_of(&window_groups(&recs, 120), &recs),
+            pairs_of(&window_groups(&shuffled, 120), &shuffled)
+        );
     }
 
     #[test]
@@ -762,9 +799,15 @@ mod tests {
             rec(4, 4, 1006, s2, hub, 1_000_000, Transfer),
         ];
         let cl_exact = cluster(&led(recs.clone()), &only(true, false, false));
-        assert!(!same(&cl_exact, s1, s2), "exact-ts misses the jittered sweep");
+        assert!(
+            !same(&cl_exact, s1, s2),
+            "exact-ts misses the jittered sweep"
+        );
         let cl_win = cluster(&led(recs), &win_only(true, false, 120));
-        assert!(same(&cl_win, s1, s2), "windowed catches it (2 shared window+hub buckets)");
+        assert!(
+            same(&cl_win, s1, s2),
+            "windowed catches it (2 shared window+hub buckets)"
+        );
     }
 
     #[test]
@@ -785,7 +828,10 @@ mod tests {
         let cl = cluster(&led(recs), &win_only(true, false, 120));
         assert!(same(&cl, s1, s1b));
         assert!(same(&cl, s2, s2b));
-        assert!(!same(&cl, s1, s2), "shared external at different windows must not merge");
+        assert!(
+            !same(&cl, s1, s2),
+            "shared external at different windows must not merge"
+        );
     }
 
     #[test]
@@ -817,11 +863,22 @@ mod tests {
         for &base in &[100i64, 2000] {
             for s in 1..=11u8 {
                 sig += 1;
-                recs.push(rec(sig, sig, base + s as i64, acc(s), hub, 1_000_000, Transfer));
+                recs.push(rec(
+                    sig,
+                    sig,
+                    base + s as i64,
+                    acc(s),
+                    hub,
+                    1_000_000,
+                    Transfer,
+                ));
             }
         }
         let cl = cluster(&led(recs), &win_only(true, false, 120));
-        assert!(!same(&cl, acc(1), acc(2)), "an 11-source window bucket is dropped");
+        assert!(
+            !same(&cl, acc(1), acc(2)),
+            "an 11-source window bucket is dropped"
+        );
     }
 
     fn only_temporal() -> AdversaryConfig {
@@ -845,11 +902,26 @@ mod tests {
                 rec(2, 2, 100 + dt, x, s2, bamt, Transfer),
             ])
         };
-        assert!(same(&cluster(&peel(0, 1_000_000), &only_temporal()), s1, s2), "dt=0 unions");
-        assert!(same(&cluster(&peel(120, 1_000_000), &only_temporal()), s1, s2), "dt=window unions");
-        assert!(!same(&cluster(&peel(121, 1_000_000), &only_temporal()), s1, s2), "dt>window no union");
+        assert!(
+            same(&cluster(&peel(0, 1_000_000), &only_temporal()), s1, s2),
+            "dt=0 unions"
+        );
+        assert!(
+            same(&cluster(&peel(120, 1_000_000), &only_temporal()), s1, s2),
+            "dt=window unions"
+        );
+        assert!(
+            !same(&cluster(&peel(121, 1_000_000), &only_temporal()), s1, s2),
+            "dt>window no union"
+        );
         // tol = 1_000_000 * 50 bps / 10_000 = 5_000.
-        assert!(same(&cluster(&peel(10, 1_005_000), &only_temporal()), s1, s2), "diff==tol unions");
-        assert!(!same(&cluster(&peel(10, 1_005_001), &only_temporal()), s1, s2), "diff>tol no union");
+        assert!(
+            same(&cluster(&peel(10, 1_005_000), &only_temporal()), s1, s2),
+            "diff==tol unions"
+        );
+        assert!(
+            !same(&cluster(&peel(10, 1_005_001), &only_temporal()), s1, s2),
+            "diff>tol no union"
+        );
     }
 }

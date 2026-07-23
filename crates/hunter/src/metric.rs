@@ -230,7 +230,10 @@ mod tests {
         };
         let r = evaluate(&ledger, &cl, 0);
         assert!((r.attribution_precision - 1.0 / 3.0).abs() < 1e-9);
-        assert!((r.largest_cluster_frac - 1.0).abs() < 1e-9, "collapse alarm should be 1.0");
+        assert!(
+            (r.largest_cluster_frac - 1.0).abs() < 1e-9,
+            "collapse alarm should be 1.0"
+        );
     }
 
     #[test]
@@ -288,10 +291,19 @@ mod tests {
             sizes: vec![],
         };
         let r0 = evaluate(&ledger, &empty, 0);
-        assert!((r0.burst_purity - 1.0).abs() < 1e-9, "exact-ts bursts are singletons");
-        assert!((r0.window_purity - 1.0).abs() < 1e-9, "window 0 == identical-ts, still pure");
+        assert!(
+            (r0.burst_purity - 1.0).abs() < 1e-9,
+            "exact-ts bursts are singletons"
+        );
+        assert!(
+            (r0.window_purity - 1.0).abs() < 1e-9,
+            "window 0 == identical-ts, still pure"
+        );
         let r120 = evaluate(&ledger, &empty, 120);
-        assert!(r120.window_purity < 1.0, "120s window merges the two operators");
+        assert!(
+            r120.window_purity < 1.0,
+            "120s window merges the two operators"
+        );
         assert_eq!(r120.window_secs, 120);
     }
 }

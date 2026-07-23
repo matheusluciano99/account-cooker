@@ -9,13 +9,16 @@
 //! decoys — is identical in both worlds; only the `Chain` sink differs.
 
 use adapters::{adapter_for, ActionContext, PlannedTx};
+use chacha20::ChaCha12Rng;
 use hunter::model::{AgentId, Ledger, TxRecord};
 use noise_core::types::{AccountId, ActionKind};
 use persona::Persona;
-use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
+
+pub mod durable;
 
 #[cfg(feature = "live")]
 pub mod live;
@@ -30,9 +33,9 @@ pub trait Chain {
 /// In-memory ledger. Records exactly the fields an on-chain observer would see.
 pub struct MockChain {
     pub ledger: Ledger,
-    clock: i64,
-    slot: u64,
-    sig: u64,
+    pub(crate) clock: i64,
+    pub(crate) slot: u64,
+    pub(crate) sig: u64,
 }
 
 impl MockChain {
@@ -93,7 +96,7 @@ pub struct SimConfig {
 }
 
 /// Tunables for the hardened Curupira path.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HardeningConfig {
     /// Mean seconds between consecutive records within one wake (exponential, min 1s).
     pub intra_gap_mean_secs: f64,
@@ -156,13 +159,49 @@ struct Sched {
     next_at: i64,
 }
 
-/// Run the simulation and return the observable ledger.
-///
-/// `Mode::Naive` and legacy Curupira (`harden_timing == false`) use the single-clock
-/// `perform_action` path; hardened Curupira uses the per-subaccount `perform_action_hardened`.
-pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
+/// Seed derivation, shared by fresh runs and durable resume.
+pub(crate) fn derive_seed(cfg: &SimConfig) -> u64 {
+    cfg.seed ^ (cfg.mode as u64).wrapping_mul(0x9E3779B9)
+}
+
+/// A sink notified as a run progresses. `NullSink` does nothing (plain `simulate`); the
+/// durable sink journals records and writes checkpoints (see the `durable` module).
+pub(crate) trait DurSink {
+    fn on_records(&mut self, new: &[TxRecord]) -> std::io::Result<()>;
+    /// Called at each top-of-loop boundary (heap full, state consistent). Returns `true` to
+    /// stop the run early without finishing — used to simulate a crash in tests.
+    fn on_boundary(&mut self, st: &RunState, done: bool) -> std::io::Result<bool>;
+}
+
+struct NullSink;
+impl DurSink for NullSink {
+    fn on_records(&mut self, _: &[TxRecord]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn on_boundary(&mut self, _: &RunState, _: bool) -> std::io::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// The full mutable state of a run: the parts reconstructible from `(personas, cfg)` plus the
+/// dynamic state a checkpoint must capture (rng, heap, chain, event count).
+pub(crate) struct RunState {
+    pub(crate) agents: Vec<Agent>,
+    pub(crate) externals: Vec<AccountId>,
+    pub(crate) sched: Vec<Sched>,
+    pub(crate) cfg: SimConfig,
+    pub(crate) end: i64,
+    pub(crate) rng: ChaCha12Rng,
+    pub(crate) heap: BinaryHeap<Reverse<(i64, usize)>>,
+    pub(crate) chain: MockChain,
+    pub(crate) events: u64,
+}
+
+/// Build a fresh run from `(personas, cfg)` — identical setup and RNG seeding to the original
+/// single-function `simulate`, so the ledger it produces is byte-identical.
+pub(crate) fn build_fresh(personas: &[Persona], cfg: &SimConfig) -> RunState {
     assert!(!personas.is_empty(), "need at least one persona");
-    let mut rng = StdRng::seed_from_u64(cfg.seed ^ (cfg.mode as u64).wrapping_mul(0x9E3779B9));
+    let mut rng = ChaCha12Rng::seed_from_u64(derive_seed(cfg));
     let hardened = cfg.mode == Mode::Curupira && cfg.harden_timing;
 
     let externals: Vec<AccountId> = (0..cfg.num_external.max(1))
@@ -217,49 +256,94 @@ pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
         });
     }
 
-    let mut chain = MockChain::new(cfg.start_ts);
+    let chain = MockChain::new(cfg.start_ts);
     let end = cfg.start_ts + cfg.duration_secs;
-
-    // Discrete-event loop over a min-heap keyed on (next_at, sched index). `Reverse` makes
-    // `BinaryHeap` pop the earliest next_at, then the lowest index — the same order the
-    // linear scan produced, so RNG draw order (and the ledger) is unchanged.
     let mut heap: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::with_capacity(sched.len());
     for (i, s) in sched.iter().enumerate() {
         heap.push(Reverse((s.next_at, i)));
     }
-    while let Some(Reverse((best, si))) = heap.pop() {
-        if best > end {
-            break;
+    RunState {
+        agents,
+        externals,
+        sched,
+        cfg: cfg.clone(),
+        end,
+        rng,
+        heap,
+        chain,
+        events: 0,
+    }
+}
+
+/// The discrete-event loop, shared by `simulate` and the durable runner. At each top-of-loop
+/// boundary the state is consistent and the heap holds every schedule entry, so
+/// `sink.on_boundary` may snapshot; `sink.on_records` receives each event's new records.
+pub(crate) fn run_core(st: &mut RunState, sink: &mut dyn DurSink) -> std::io::Result<()> {
+    loop {
+        let done = st
+            .heap
+            .peek()
+            .is_none_or(|Reverse((best, _))| *best > st.end);
+        if sink.on_boundary(st, done)? {
+            return Ok(());
         }
-        let (agent_idx, sub_idx) = (sched[si].agent_idx, sched[si].sub_idx);
-        chain.set_time(best);
+        if done {
+            return Ok(());
+        }
+        let Reverse((best, si)) = st.heap.pop().unwrap();
+        let (agent_idx, sub_idx) = (st.sched[si].agent_idx, st.sched[si].sub_idx);
+        st.chain.set_time(best);
+        let before = st.chain.ledger.records.len();
         match sub_idx {
             None => {
-                perform_action(&mut chain, &mut agents[agent_idx], &externals, cfg.mode, &mut rng);
+                perform_action(
+                    &mut st.chain,
+                    &mut st.agents[agent_idx],
+                    &st.externals,
+                    st.cfg.mode,
+                    &mut st.rng,
+                );
                 let sod = best.rem_euclid(86_400) as u64;
-                let d = agents[agent_idx]
+                let d = st.agents[agent_idx]
                     .persona
                     .circadian
-                    .next_delay_secs(sod, &mut rng) as i64;
-                heap.push(Reverse((best + d.max(1), si)));
+                    .next_delay_secs(sod, &mut st.rng) as i64;
+                st.heap.push(Reverse((best + d.max(1), si)));
             }
             Some(k) => {
-                perform_action_hardened(&mut chain, &agents[agent_idx], k, &externals, cfg, &mut rng);
-                let phase = agents[agent_idx].sub_sched[k].phase;
+                perform_action_hardened(
+                    &mut st.chain,
+                    &st.agents[agent_idx],
+                    k,
+                    &st.externals,
+                    &st.cfg,
+                    &mut st.rng,
+                );
+                let phase = st.agents[agent_idx].sub_sched[k].phase;
                 let sod = (best + phase).rem_euclid(86_400) as u64;
-                let mut d = agents[agent_idx]
+                let mut d = st.agents[agent_idx]
                     .persona
                     .circadian
-                    .next_delay_secs(sod, &mut rng) as i64;
-                if cfg.hardening.hold_aggregate_rate {
-                    d *= agents[agent_idx].subaccounts.len() as i64;
+                    .next_delay_secs(sod, &mut st.rng) as i64;
+                if st.cfg.hardening.hold_aggregate_rate {
+                    d *= st.agents[agent_idx].subaccounts.len() as i64;
                 }
-                heap.push(Reverse((best + d.max(1), si)));
+                st.heap.push(Reverse((best + d.max(1), si)));
             }
         }
+        sink.on_records(&st.chain.ledger.records[before..])?;
+        st.events += 1;
     }
+}
 
-    chain.ledger
+/// Run the simulation and return the observable ledger.
+///
+/// `Mode::Naive` and legacy Curupira (`harden_timing == false`) use the single-clock
+/// `perform_action` path; hardened Curupira uses the per-subaccount `perform_action_hardened`.
+pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
+    let mut st = build_fresh(personas, cfg);
+    run_core(&mut st, &mut NullSink).expect("NullSink never fails");
+    st.chain.ledger
 }
 
 fn perform_action(
@@ -267,7 +351,7 @@ fn perform_action(
     agent: &mut Agent,
     externals: &[AccountId],
     mode: Mode,
-    rng: &mut StdRng,
+    rng: &mut ChaCha12Rng,
 ) {
     let kind = agent.persona.choose_action(rng);
     let source = agent.subaccounts[rng.random_range(0..agent.subaccounts.len())];
@@ -305,7 +389,7 @@ fn perform_action(
 }
 
 /// Exponential inter-record gap (seconds, >= 1) used to spread a hardened wake across time.
-fn intra_gap(cfg: &SimConfig, rng: &mut StdRng) -> i64 {
+fn intra_gap(cfg: &SimConfig, rng: &mut ChaCha12Rng) -> i64 {
     let mean = cfg.hardening.intra_gap_mean_secs.max(1.0);
     let u = rng.random::<f64>().clamp(1e-9, 1.0);
     (-u.ln() * mean).max(1.0) as i64
@@ -320,7 +404,7 @@ fn perform_action_hardened(
     sub_idx: usize,
     externals: &[AccountId],
     cfg: &SimConfig,
-    rng: &mut StdRng,
+    rng: &mut ChaCha12Rng,
 ) {
     let mut t = chain.now();
     let source = agent.subaccounts[sub_idx]; // one source for the whole wake
@@ -387,7 +471,7 @@ fn consolidate_sweep(
     agent: &Agent,
     t: &mut i64,
     cfg: &SimConfig,
-    rng: &mut StdRng,
+    rng: &mut ChaCha12Rng,
 ) {
     let n = agent.subaccounts.len();
     if n < 2 {
@@ -430,7 +514,7 @@ fn emit_with_noise(
     agent: &Agent,
     p: &PlannedTx,
     mode: Mode,
-    rng: &mut StdRng,
+    rng: &mut ChaCha12Rng,
 ) {
     match mode {
         // Sloppy: one stable fee-payer (the main account) pays for everything, no
@@ -463,7 +547,7 @@ fn emit_with_noise(
 }
 
 /// Periodic consolidation/redistribution.
-fn maybe_rebalance(chain: &mut MockChain, agent: &Agent, mode: Mode, rng: &mut StdRng) {
+fn maybe_rebalance(chain: &mut MockChain, agent: &Agent, mode: Mode, rng: &mut ChaCha12Rng) {
     match mode {
         // Naive: funnel every sub-account into the main account. Textbook co-spend.
         Mode::Naive => {
@@ -539,14 +623,28 @@ mod tests {
     fn arms_race_ledgers() -> (Ledger, Ledger, Ledger) {
         let personas = Persona::presets();
         let base = SimConfig::default();
-        let naive = simulate(&personas, &SimConfig { mode: Mode::Naive, ..base.clone() });
+        let naive = simulate(
+            &personas,
+            &SimConfig {
+                mode: Mode::Naive,
+                ..base.clone()
+            },
+        );
         let hardened = simulate(
             &personas,
-            &SimConfig { mode: Mode::Curupira, harden_timing: true, ..base.clone() },
+            &SimConfig {
+                mode: Mode::Curupira,
+                harden_timing: true,
+                ..base.clone()
+            },
         );
         let legacy = simulate(
             &personas,
-            &SimConfig { mode: Mode::Curupira, harden_timing: false, ..base.clone() },
+            &SimConfig {
+                mode: Mode::Curupira,
+                harden_timing: false,
+                ..base.clone()
+            },
         );
         (naive, hardened, legacy)
     }
@@ -567,19 +665,47 @@ mod tests {
         let (_, l_exact) = analyze(&legacy, &exact);
 
         // Naive is fully recovered by both adversaries.
-        assert!(n_exact.attribution_f1 > 0.9, "naive exact f1 {}", n_exact.attribution_f1);
-        assert!(n_win.attribution_f1 > 0.9, "naive windowed f1 {}", n_win.attribution_f1);
+        assert!(
+            n_exact.attribution_f1 > 0.9,
+            "naive exact f1 {}",
+            n_exact.attribution_f1
+        );
+        assert!(
+            n_win.attribution_f1 > 0.9,
+            "naive windowed f1 {}",
+            n_win.attribution_f1
+        );
 
         // The windowed adversary still fully de-anonymizes legacy Curupira at high precision.
-        assert!(l_win.attribution_f1 > 0.9, "legacy windowed f1 {}", l_win.attribution_f1);
-        assert!(l_win.attribution_precision > 0.9, "legacy windowed prec {}", l_win.attribution_precision);
-        assert!(l_exact.attribution_f1 > 0.9, "legacy exact f1 {}", l_exact.attribution_f1);
+        assert!(
+            l_win.attribution_f1 > 0.9,
+            "legacy windowed f1 {}",
+            l_win.attribution_f1
+        );
+        assert!(
+            l_win.attribution_precision > 0.9,
+            "legacy windowed prec {}",
+            l_win.attribution_precision
+        );
+        assert!(
+            l_exact.attribution_f1 > 0.9,
+            "legacy exact f1 {}",
+            l_exact.attribution_f1
+        );
 
         // Exact-ts collapses on hardened Curupira (no same-ts fan-out to key on).
-        assert!(h_exact.attribution_f1 < 0.3, "hardened exact f1 {}", h_exact.attribution_f1);
+        assert!(
+            h_exact.attribution_f1 < 0.3,
+            "hardened exact f1 {}",
+            h_exact.attribution_f1
+        );
 
         // Windowed vs hardened: nonzero, clearly below naive, at high precision, no collapse.
-        assert!(h_win.attribution_f1 > 0.0, "residual must be nonzero, got {}", h_win.attribution_f1);
+        assert!(
+            h_win.attribution_f1 > 0.0,
+            "residual must be nonzero, got {}",
+            h_win.attribution_f1
+        );
         assert!(
             h_win.attribution_f1 < n_win.attribution_f1 - 0.30,
             "gap to naive too small: hardened {} vs naive {}",
@@ -591,7 +717,11 @@ mod tests {
             "windowed hardened precision {} — that would be dishonest over-merge",
             h_win.attribution_precision
         );
-        assert!(h_win.largest_cluster_frac < 0.5, "collapse: lcf {}", h_win.largest_cluster_frac);
+        assert!(
+            h_win.largest_cluster_frac < 0.5,
+            "collapse: lcf {}",
+            h_win.largest_cluster_frac
+        );
     }
 
     #[test]
@@ -599,13 +729,43 @@ mod tests {
         // Byte-identical guarantee: the naive path ignores harden_timing entirely.
         let personas = Persona::presets();
         let base = SimConfig::default();
-        let a = simulate(&personas, &SimConfig { mode: Mode::Naive, harden_timing: true, ..base.clone() });
-        let b = simulate(&personas, &SimConfig { mode: Mode::Naive, harden_timing: false, ..base.clone() });
+        let a = simulate(
+            &personas,
+            &SimConfig {
+                mode: Mode::Naive,
+                harden_timing: true,
+                ..base.clone()
+            },
+        );
+        let b = simulate(
+            &personas,
+            &SimConfig {
+                mode: Mode::Naive,
+                harden_timing: false,
+                ..base.clone()
+            },
+        );
         assert_eq!(a.records.len(), b.records.len());
         for (x, y) in a.records.iter().zip(b.records.iter()) {
             assert_eq!(
-                (x.ts, x.slot, x.source, x.dest, x.amount, x.kind, x.fee_payer),
-                (y.ts, y.slot, y.source, y.dest, y.amount, y.kind, y.fee_payer)
+                (
+                    x.ts,
+                    x.slot,
+                    x.source,
+                    x.dest,
+                    x.amount,
+                    x.kind,
+                    x.fee_payer
+                ),
+                (
+                    y.ts,
+                    y.slot,
+                    y.source,
+                    y.dest,
+                    y.amount,
+                    y.kind,
+                    y.fee_payer
+                )
             );
         }
     }
@@ -619,7 +779,10 @@ mod tests {
         assert_eq!(a.records.len(), b.records.len());
         assert!(!a.records.is_empty());
         for (x, y) in a.records.iter().zip(b.records.iter()) {
-            assert_eq!((x.ts, x.slot, x.source, x.dest, x.amount), (y.ts, y.slot, y.source, y.dest, y.amount));
+            assert_eq!(
+                (x.ts, x.slot, x.source, x.dest, x.amount),
+                (y.ts, y.slot, y.source, y.dest, y.amount)
+            );
         }
     }
 
@@ -627,9 +790,27 @@ mod tests {
     fn legacy_curupira_reproducible_and_distinct_from_hardened() {
         let personas = Persona::presets();
         let base = SimConfig::default();
-        let legacy1 = simulate(&personas, &SimConfig { harden_timing: false, ..base.clone() });
-        let legacy2 = simulate(&personas, &SimConfig { harden_timing: false, ..base.clone() });
-        let hardened = simulate(&personas, &SimConfig { harden_timing: true, ..base.clone() });
+        let legacy1 = simulate(
+            &personas,
+            &SimConfig {
+                harden_timing: false,
+                ..base.clone()
+            },
+        );
+        let legacy2 = simulate(
+            &personas,
+            &SimConfig {
+                harden_timing: false,
+                ..base.clone()
+            },
+        );
+        let hardened = simulate(
+            &personas,
+            &SimConfig {
+                harden_timing: true,
+                ..base.clone()
+            },
+        );
         assert_eq!(legacy1.records.len(), legacy2.records.len());
         for (x, y) in legacy1.records.iter().zip(legacy2.records.iter()) {
             assert_eq!((x.ts, x.slot, x.source), (y.ts, y.slot, y.source));
@@ -670,11 +851,35 @@ mod tests {
             ..SimConfig::default()
         };
         let t0 = Instant::now();
-        let naive = simulate(&personas, &SimConfig { mode: Mode::Naive, ..base.clone() });
-        let hardened = simulate(&personas, &SimConfig { mode: Mode::Curupira, harden_timing: true, ..base.clone() });
-        let hardened2 = simulate(&personas, &SimConfig { mode: Mode::Curupira, harden_timing: true, ..base.clone() });
+        let naive = simulate(
+            &personas,
+            &SimConfig {
+                mode: Mode::Naive,
+                ..base.clone()
+            },
+        );
+        let hardened = simulate(
+            &personas,
+            &SimConfig {
+                mode: Mode::Curupira,
+                harden_timing: true,
+                ..base.clone()
+            },
+        );
+        let hardened2 = simulate(
+            &personas,
+            &SimConfig {
+                mode: Mode::Curupira,
+                harden_timing: true,
+                ..base.clone()
+            },
+        );
 
-        assert!(hardened.records.len() > 1_000_000, "expected millions of records, got {}", hardened.records.len());
+        assert!(
+            hardened.records.len() > 1_000_000,
+            "expected millions of records, got {}",
+            hardened.records.len()
+        );
         assert_eq!(hardened.records.len(), hardened2.records.len());
 
         let win = AdversaryConfig::windowed(120);
@@ -691,22 +896,45 @@ mod tests {
         );
 
         // Determinism at scale (bit-identical).
-        assert_eq!(h_win.attribution_f1.to_bits(), h2_win.attribution_f1.to_bits());
+        assert_eq!(
+            h_win.attribution_f1.to_bits(),
+            h2_win.attribution_f1.to_bits()
+        );
         assert_eq!(h_win.num_clusters, h2_win.num_clusters);
 
         // Structural arms-race invariants (scale-invariant — NOT the 12-agent constants).
-        assert!(n_win.attribution_f1 > 0.9, "naive windowed f1 {}", n_win.attribution_f1);
-        assert!(h_win.attribution_f1 > 0.0, "hardened residual must be nonzero {}", h_win.attribution_f1);
+        assert!(
+            n_win.attribution_f1 > 0.9,
+            "naive windowed f1 {}",
+            n_win.attribution_f1
+        );
+        assert!(
+            h_win.attribution_f1 > 0.0,
+            "hardened residual must be nonzero {}",
+            h_win.attribution_f1
+        );
         assert!(
             h_win.attribution_f1 < n_win.attribution_f1 - 0.30,
             "gap to naive too small: hardened {} vs naive {}",
             h_win.attribution_f1,
             n_win.attribution_f1
         );
-        assert!(h_win.attribution_precision >= 0.80, "precision {}", h_win.attribution_precision);
-        assert!(h_win.largest_cluster_frac < 0.5, "lcf {}", h_win.largest_cluster_frac);
+        assert!(
+            h_win.attribution_precision >= 0.80,
+            "precision {}",
+            h_win.attribution_precision
+        );
+        assert!(
+            h_win.largest_cluster_frac < 0.5,
+            "lcf {}",
+            h_win.largest_cluster_frac
+        );
 
         // Generous guard against a regression back to super-linear behavior.
-        assert!(elapsed.as_secs() < 600, "scale run took {:?} — possible O(n^2) regression", elapsed);
+        assert!(
+            elapsed.as_secs() < 600,
+            "scale run took {:?} — possible O(n^2) regression",
+            elapsed
+        );
     }
 }

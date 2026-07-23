@@ -3,14 +3,17 @@
 //! `demo`   run naive vs Curupira fleets and print the before/after attribution numbers
 //! `dump`   write a simulated ledger to JSON
 //! `report` score a ledger JSON with O Cacador
+//! `run`    run a fleet durably (crash-safe checkpoint/resume)
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+use agent_runtime::durable::{resume_durable, simulate_durable, DurabilityOpts};
 use agent_runtime::{simulate, Mode, SimConfig};
 use hunter::model::Ledger;
 use hunter::{analyze, AdversaryConfig, Report};
 use persona::Persona;
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +56,35 @@ enum Cmd {
         #[arg(long)]
         out: String,
     },
+    /// Run a fleet durably: journals to a run directory and checkpoints as it goes, so a
+    /// crash (SIGKILL) can be resumed with `--resume`. The final ledger is byte-identical to
+    /// an uninterrupted run.
+    Run {
+        #[arg(long, default_value = "curupira")]
+        mode: String,
+        #[arg(long, default_value_t = 12)]
+        agents: usize,
+        #[arg(long, default_value_t = 3)]
+        days: i64,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        #[arg(long, default_value_t = 40)]
+        external: usize,
+        /// Run directory holding ledger.jsonl + checkpoint.json.
+        #[arg(long)]
+        dir: String,
+        /// Write the final ledger JSON here (same format as `dump`).
+        #[arg(long)]
+        out: String,
+        /// Resume from the checkpoint in --dir instead of starting fresh.
+        #[arg(long, default_value_t = false)]
+        resume: bool,
+        #[arg(long, default_value_t = 10_000)]
+        checkpoint_every: u64,
+        /// Skip fsync (faster, but not crash-durable across power loss). Default: fsync on.
+        #[arg(long, default_value_t = false)]
+        no_fsync: bool,
+    },
     /// Score an existing ledger JSON with the adversarial harness.
     Report {
         #[arg(long)]
@@ -82,6 +114,29 @@ fn main() -> Result<()> {
             external,
             out,
         } => dump(&mode, agents, days, seed, external, &out),
+        Cmd::Run {
+            mode,
+            agents,
+            days,
+            seed,
+            external,
+            dir,
+            out,
+            resume,
+            checkpoint_every,
+            no_fsync,
+        } => run_durable(
+            &mode,
+            agents,
+            days,
+            seed,
+            external,
+            &dir,
+            &out,
+            resume,
+            checkpoint_every,
+            !no_fsync,
+        ),
         Cmd::Report { ledger } => report(&ledger),
         Cmd::Personas { out_dir } => write_personas(&out_dir),
     }
@@ -112,14 +167,28 @@ fn demo(agents: usize, days: i64, seed: u64, external: usize) -> Result<()> {
     let personas = Persona::presets();
     let base = base_cfg(agents, days, seed, external);
     // Three ledgers: naive baseline, hardened Curupira (default), and legacy (un-hardened).
-    let naive = simulate(&personas, &SimConfig { mode: Mode::Naive, ..base.clone() });
+    let naive = simulate(
+        &personas,
+        &SimConfig {
+            mode: Mode::Naive,
+            ..base.clone()
+        },
+    );
     let hardened = simulate(
         &personas,
-        &SimConfig { mode: Mode::Curupira, harden_timing: true, ..base.clone() },
+        &SimConfig {
+            mode: Mode::Curupira,
+            harden_timing: true,
+            ..base.clone()
+        },
     );
     let legacy = simulate(
         &personas,
-        &SimConfig { mode: Mode::Curupira, harden_timing: false, ..base.clone() },
+        &SimConfig {
+            mode: Mode::Curupira,
+            harden_timing: false,
+            ..base.clone()
+        },
     );
 
     let exact = AdversaryConfig::exact_ts();
@@ -135,7 +204,10 @@ fn demo(agents: usize, days: i64, seed: u64, external: usize) -> Result<()> {
     println!("  Curupira — believable activity vs adversarial attribution (O Cacador)");
     println!("  seed={seed}  agents={agents}  days={days}");
     println!();
-    println!("  {:<24}{:>10}{:>10}{:>10}", "", "NAIVE", "CURUPIRA", "LEGACY");
+    println!(
+        "  {:<24}{:>10}{:>10}{:>10}",
+        "", "NAIVE", "CURUPIRA", "LEGACY"
+    );
     row3(
         "transactions",
         naive.records.len() as f64,
@@ -152,14 +224,50 @@ fn demo(agents: usize, days: i64, seed: u64, external: usize) -> Result<()> {
     );
     println!();
     println!("  -- adversary: exact-ts v2 (the straw-man per-tx jitter defeats) --");
-    row3("attribution F1  (down)", n_x.attribution_f1, h_x.attribution_f1, l_x.attribution_f1, Fmt::F2);
-    row3("precision", n_x.attribution_precision, h_x.attribution_precision, l_x.attribution_precision, Fmt::F2);
+    row3(
+        "attribution F1  (down)",
+        n_x.attribution_f1,
+        h_x.attribution_f1,
+        l_x.attribution_f1,
+        Fmt::F2,
+    );
+    row3(
+        "precision",
+        n_x.attribution_precision,
+        h_x.attribution_precision,
+        l_x.attribution_precision,
+        Fmt::F2,
+    );
     println!();
     println!("  -- adversary: windowed v3 (the HEADLINE — buckets by dt) --");
-    row3("attribution F1  (down)", n_w.attribution_f1, h_w.attribution_f1, l_w.attribution_f1, Fmt::F2);
-    row3("precision (up=honest)", n_w.attribution_precision, h_w.attribution_precision, l_w.attribution_precision, Fmt::F2);
-    row3("linkage recall  (down)", n_w.linkage_recall, h_w.linkage_recall, l_w.linkage_recall, Fmt::F2);
-    row3("largest cluster (down)", n_w.largest_cluster_frac, h_w.largest_cluster_frac, l_w.largest_cluster_frac, Fmt::F2);
+    row3(
+        "attribution F1  (down)",
+        n_w.attribution_f1,
+        h_w.attribution_f1,
+        l_w.attribution_f1,
+        Fmt::F2,
+    );
+    row3(
+        "precision (up=honest)",
+        n_w.attribution_precision,
+        h_w.attribution_precision,
+        l_w.attribution_precision,
+        Fmt::F2,
+    );
+    row3(
+        "linkage recall  (down)",
+        n_w.linkage_recall,
+        h_w.linkage_recall,
+        l_w.linkage_recall,
+        Fmt::F2,
+    );
+    row3(
+        "largest cluster (down)",
+        n_w.largest_cluster_frac,
+        h_w.largest_cluster_frac,
+        l_w.largest_cluster_frac,
+        Fmt::F2,
+    );
     println!();
     verdict(&n_w, &h_w, &h_x);
     ablation(&hardened);
@@ -227,9 +335,7 @@ fn verdict(naive_w: &Report, hardened_w: &Report, hardened_x: &Report) {
             hardened_x.attribution_f1
         );
     } else {
-        println!(
-            "  Verdict: the noise did not measurably help against the windowed adversary",
-        );
+        println!("  Verdict: the noise did not measurably help against the windowed adversary",);
         println!(
             "  (F1 {:.2} vs naive {:.2}). The harness reports it honestly, no spin.",
             hardened_w.attribution_f1, naive_w.attribution_f1
@@ -250,6 +356,47 @@ fn dump(mode: &str, agents: usize, days: i64, seed: u64, external: usize, out: &
     let json = serde_json::to_string_pretty(&ledger)?;
     std::fs::write(out, json).with_context(|| format!("writing {out}"))?;
     println!("wrote {} records to {out}", ledger.records.len());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_durable(
+    mode: &str,
+    agents: usize,
+    days: i64,
+    seed: u64,
+    external: usize,
+    dir: &str,
+    out: &str,
+    resume: bool,
+    checkpoint_every: u64,
+    fsync: bool,
+) -> Result<()> {
+    let m = match mode.to_lowercase().as_str() {
+        "naive" => Mode::Naive,
+        _ => Mode::Curupira,
+    };
+    let cfg = SimConfig {
+        mode: m,
+        ..base_cfg(agents, days, seed, external)
+    };
+    let personas = Persona::presets();
+    let dirp = Path::new(dir);
+    let opts = DurabilityOpts {
+        snapshot_every_events: checkpoint_every.max(1),
+        fsync,
+    };
+    let ledger = if resume && dirp.join("checkpoint.json").exists() {
+        resume_durable(&personas, &cfg, dirp, opts).context("resuming durable run")?
+    } else {
+        simulate_durable(&personas, &cfg, dirp, opts).context("durable run")?
+    };
+    let json = serde_json::to_string_pretty(&ledger)?;
+    std::fs::write(out, json).with_context(|| format!("writing {out}"))?;
+    println!(
+        "wrote {} records to {out} (run dir {dir})",
+        ledger.records.len()
+    );
     Ok(())
 }
 
