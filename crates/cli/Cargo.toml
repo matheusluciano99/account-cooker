@@ -1,0 +1,19 @@
+[package]
+name = "curupira-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Command-line interface: run the fleet, analyze ledgers, prove the before/after."
+
+[[bin]]
+name = "curupira"
+path = "src/main.rs"
+
+[dependencies]
+agent-runtime.workspace = true
+hunter.workspace = true
+persona.workspace = true
+noise-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true

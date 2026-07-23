@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.pdb
+ledger.json
+*.ledger.json
+.DS_Store
+
+# private working notes — not for the public PR
+.dev-notes/
+CLAUDE.md
