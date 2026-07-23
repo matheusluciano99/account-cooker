@@ -47,6 +47,11 @@ impl RunId {
         let mut h = Sha256::new();
         h.update(serde_json::to_vec(personas).expect("personas serialize"));
         h.update(serde_json::to_vec(&cfg.hardening).expect("hardening serialize"));
+        // Fold funding into the digest only when set, so a `None` run keeps the exact v3 digest
+        // (pre-funding checkpoints still resume); a funding-policy change is then refused.
+        if let Some(f) = &cfg.funding {
+            h.update(serde_json::to_vec(f).expect("funding serialize"));
+        }
         RunId {
             format: CHECKPOINT_FORMAT,
             seed: cfg.seed,
@@ -242,7 +247,7 @@ pub fn simulate_durable(
     let mut st = build_fresh(personas, cfg);
     let mut sink = DurableSink::create(dir, run_id, opts)?;
     run_core(&mut st, &mut sink)?;
-    Ok(st.chain.ledger)
+    Ok(crate::finalize_funding(st, cfg))
 }
 
 /// Resume an interrupted run from its last checkpoint and finish. Idempotent across any
@@ -299,7 +304,7 @@ pub fn resume_durable(
 
     let mut sink = DurableSink::reopen(dir, expected, opts, cp.journal_len_bytes)?;
     run_core(&mut st, &mut sink)?;
-    Ok(st.chain.ledger)
+    Ok(crate::finalize_funding(st, cfg))
 }
 
 /// Load exactly `count` complete records from the journal, first truncating any bytes beyond
@@ -475,6 +480,97 @@ mod tests {
                 let _ = fs::remove_dir_all(&dir);
             }
         }
+    }
+
+    /// Crash-safety holds with funding ON: the funding post-pass is applied identically after a
+    /// fresh finish and after a mid-run resume, so the funded ledger is byte-identical either way.
+    #[test]
+    fn mid_run_resume_equals_golden_with_funding() {
+        use crate::{FundingConfig, FundingPolicy};
+        let personas = Persona::presets();
+        let cfg = SimConfig {
+            funding: Some(FundingConfig::new(FundingPolicy::SharedRelayers { k: 3 })),
+            ..small_cfg(Mode::Curupira, true)
+        };
+        let golden = simulate(&personas, &cfg);
+        let total_events = golden.records.len().max(4);
+        for frac in [0.3f64, 0.7] {
+            let dir = tmpdir("resume-fund");
+            let opts = DurabilityOpts {
+                snapshot_every_events: 25,
+                fsync: false,
+            };
+            let run_id = RunId::derive(&personas, &cfg);
+            let mut st = build_fresh(&personas, &cfg);
+            let mut crash = CrashSink {
+                inner: DurableSink::create(&dir, run_id, opts).unwrap(),
+                stop_after: (total_events as f64 * frac) as u64,
+            };
+            run_core(&mut st, &mut crash).unwrap();
+            drop(crash);
+            let resumed = resume_durable(&personas, &cfg, &dir, opts).unwrap();
+            assert!(
+                same_records(&resumed, &golden),
+                "funded resume(frac={frac}) != golden"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// A checkpoint written under one funding policy refuses to resume under another.
+    #[test]
+    fn resume_refuses_funding_mismatch() {
+        use crate::{FundingConfig, FundingPolicy};
+        let personas = Persona::presets();
+        let hub = SimConfig {
+            funding: Some(FundingConfig::new(FundingPolicy::OperatorHub)),
+            ..small_cfg(Mode::Curupira, true)
+        };
+        let dir = tmpdir("fund-mismatch");
+        let opts = DurabilityOpts {
+            snapshot_every_events: 25,
+            fsync: false,
+        };
+        let run_id = RunId::derive(&personas, &hub);
+        let mut st = build_fresh(&personas, &hub);
+        let mut crash = CrashSink {
+            inner: DurableSink::create(&dir, run_id, opts).unwrap(),
+            stop_after: 2,
+        };
+        run_core(&mut st, &mut crash).unwrap();
+        drop(crash);
+        let relayers = SimConfig {
+            funding: Some(FundingConfig::new(FundingPolicy::SharedRelayers { k: 2 })),
+            ..small_cfg(Mode::Curupira, true)
+        };
+        assert!(
+            resume_durable(&personas, &relayers, &dir, opts).is_err(),
+            "must refuse a changed funding policy"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A `None`-funding run keeps the exact pre-funding RunId digest (old checkpoints resume).
+    #[test]
+    fn funding_none_keeps_v3_digest() {
+        use crate::{FundingConfig, FundingPolicy};
+        let personas = Persona::presets();
+        let none = small_cfg(Mode::Curupira, true);
+        let some = SimConfig {
+            funding: Some(FundingConfig::new(FundingPolicy::OperatorHub)),
+            ..none.clone()
+        };
+        let d_none = RunId::derive(&personas, &none);
+        let d_some = RunId::derive(&personas, &some);
+        assert_ne!(
+            d_none.inputs_digest, d_some.inputs_digest,
+            "funding must change the digest when set"
+        );
+        // And two None runs agree (sanity: the None branch adds nothing).
+        assert_eq!(
+            d_none.inputs_digest,
+            RunId::derive(&personas, &none).inputs_digest
+        );
     }
 
     #[test]

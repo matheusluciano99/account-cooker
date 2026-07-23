@@ -98,6 +98,15 @@ pub struct AdversaryConfig {
     pub use_windowed: bool,
     /// Window width in seconds when `use_windowed` (0 = identical-ts, a superset of bursts).
     pub window_secs: i64,
+
+    /// H-FUNDER: walk the common-funder graph — accounts whose throwaway fee-payers were funded
+    /// by one wallet are one entity. Default OFF so every legacy config is byte-unchanged.
+    pub use_funder_graph: bool,
+    /// A funder must have funded at least this many distinct fee-payers to count as a pattern.
+    pub funder_min_fundees: usize,
+    /// Drop a funder whose downstream sources exceed this — it is a shared service (relayer,
+    /// exchange), not one owner. Mirrors `burst_max_sources` (just above the whale's 8 subs).
+    pub funder_max_sources: usize,
 }
 
 impl Default for AdversaryConfig {
@@ -121,6 +130,9 @@ impl Default for AdversaryConfig {
             split_min_part_floor: 1_000,
             use_windowed: false,
             window_secs: 120,
+            use_funder_graph: false,
+            funder_min_fundees: 3,
+            funder_max_sources: 10,
         }
     }
 }
@@ -142,6 +154,14 @@ impl AdversaryConfig {
     /// Identical-ts grouping with copay + co-activity. Alias for the default config.
     pub fn exact_ts() -> Self {
         AdversaryConfig::default()
+    }
+
+    /// The windowed adversary plus the common-funder graph — used to score funded ledgers.
+    pub fn funder_aware(window_secs: i64) -> Self {
+        AdversaryConfig {
+            use_funder_graph: true,
+            ..AdversaryConfig::windowed(window_secs)
+        }
     }
 }
 
@@ -267,6 +287,23 @@ fn coact_edges(
     weight
 }
 
+/// Infer the funding graph from public fields only: a transfer whose destination is some
+/// account's fee-payer, sent by a different account, looks like a fee-payer top-up. Returns
+/// `funder -> {funded fee-payers}`. Deliberately label-free (keys on structure, not a `kind`
+/// tag), so it also fires on any real funding a chain would show, and is empty on a ledger with
+/// no funding (fee-payers there are fresh randoms that never appear as a destination).
+pub(crate) fn funding_edges(records: &[TxRecord]) -> HashMap<AccountId, BTreeSet<AccountId>> {
+    let fee_set: std::collections::HashSet<AccountId> =
+        records.iter().map(|r| r.fee_payer).collect();
+    let mut children: HashMap<AccountId, BTreeSet<AccountId>> = HashMap::new();
+    for r in records {
+        if r.source != r.dest && fee_set.contains(&r.dest) {
+            children.entry(r.source).or_default().insert(r.dest);
+        }
+    }
+    children
+}
+
 pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
     let accounts = ledger.accounts();
     let mut uf = UnionFind::new(accounts.iter());
@@ -369,6 +406,41 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
         for (&(a, b), &w) in &coact_edges(&groups, &ledger.records, cfg) {
             if w >= cfg.coactivity_min_shared_bursts {
                 uf.union(a, b);
+            }
+        }
+    }
+
+    // (7) Common-funder graph. A funder's fee-payers were signed for by the operator's own
+    // sources (heuristic (1) ties each fee-payer to its source); collapsing every source reached
+    // through one funder undoes fee-payer rotation. A funder serving more sources than
+    // `funder_max_sources` is a shared service (relayer/exchange) — dropped, not attributed.
+    if cfg.use_funder_graph {
+        let children = funding_edges(&ledger.records);
+        // fee-payer -> the sources that used it (a funding tx has fee_payer == source; skip it).
+        let mut fp_sources: HashMap<AccountId, BTreeSet<AccountId>> = HashMap::new();
+        for r in &ledger.records {
+            if r.fee_payer != r.source {
+                fp_sources.entry(r.fee_payer).or_default().insert(r.source);
+            }
+        }
+        for (funder, fps) in &children {
+            if fps.len() < cfg.funder_min_fundees {
+                continue;
+            }
+            let mut srcs: BTreeSet<AccountId> = BTreeSet::new();
+            for fp in fps {
+                if let Some(s) = fp_sources.get(fp) {
+                    srcs.extend(s.iter().copied());
+                }
+            }
+            if srcs.len() < 2 || srcs.len() > cfg.funder_max_sources {
+                continue;
+            }
+            // Union the funder in too — a real analyst who identifies the funder attributes it to
+            // the same entity. Metric-neutral for a relayer (unowned), and it is what restores a
+            // dedicated funder's own account to its operator's cluster.
+            for &s in &srcs {
+                uf.union(*funder, s);
             }
         }
     }
@@ -890,6 +962,171 @@ mod tests {
             use_burst_coactivity: false,
             ..AdversaryConfig::default()
         }
+    }
+
+    // ---- v4 funder-graph tests ----
+
+    /// A record with an explicit fee_payer (funding txs set fee_payer == source == funder).
+    fn recf(
+        sig: u64,
+        slot: u64,
+        ts: i64,
+        fee_payer: AccountId,
+        source: AccountId,
+        dest: AccountId,
+        kind: ActionKind,
+    ) -> TxRecord {
+        TxRecord {
+            sig,
+            slot,
+            ts,
+            fee_payer,
+            source,
+            dest,
+            amount: 1_000_000,
+            kind,
+            operator: None,
+        }
+    }
+
+    /// Config isolating H-FUNDER (all other heuristics off).
+    fn only_funder() -> AdversaryConfig {
+        AdversaryConfig {
+            use_fee_payer: false,
+            use_cospend: false,
+            use_temporal_amount: false,
+            use_burst_copay: false,
+            use_burst_coactivity: false,
+            use_funder_graph: true,
+            funder_min_fundees: 3,
+            funder_max_sources: 10,
+            ..AdversaryConfig::default()
+        }
+    }
+
+    #[test]
+    fn funder_unions_sources_of_common_funder() {
+        // Funder u funds throwaways fp1..fp3; each pays for a distinct source s1..s3.
+        let (u, fp1, fp2, fp3, s1, s2, s3, d) = (
+            acc(100),
+            acc(1),
+            acc(2),
+            acc(3),
+            acc(11),
+            acc(12),
+            acc(13),
+            acc(50),
+        );
+        let recs = vec![
+            recf(1, 1, 10, u, u, fp1, Transfer), // u funds fp1
+            recf(2, 2, 11, u, u, fp2, Transfer),
+            recf(3, 3, 12, u, u, fp3, Transfer),
+            recf(4, 4, 20, fp1, s1, d, Transfer), // fp1 pays for s1's action
+            recf(5, 5, 21, fp2, s2, d, Transfer),
+            recf(6, 6, 22, fp3, s3, d, Transfer),
+        ];
+        let cl = cluster(&led(recs), &only_funder());
+        assert!(
+            same(&cl, s1, s2) && same(&cl, s2, s3),
+            "shared funder unions sources"
+        );
+        assert!(
+            same(&cl, u, s1),
+            "the funder is unioned into the cluster too"
+        );
+    }
+
+    #[test]
+    fn funder_below_min_fundees_no_union() {
+        let (u, fp1, fp2, s1, s2, d) = (acc(100), acc(1), acc(2), acc(11), acc(12), acc(50));
+        let recs = vec![
+            recf(1, 1, 10, u, u, fp1, Transfer),
+            recf(2, 2, 11, u, u, fp2, Transfer),
+            recf(3, 3, 20, fp1, s1, d, Transfer),
+            recf(4, 4, 21, fp2, s2, d, Transfer),
+        ];
+        let cl = cluster(&led(recs), &only_funder());
+        assert!(!same(&cl, s1, s2), "2 fundees is below min_fundees 3");
+    }
+
+    #[test]
+    fn funder_size_cap_drops_shared_service() {
+        // A relayer funds 11 fee-payers across 11 sources: above funder_max_sources=10, dropped.
+        let u = acc(200);
+        let mut recs = Vec::new();
+        let mut sig = 0u64;
+        for i in 1..=11u8 {
+            sig += 1;
+            recs.push(recf(sig, sig, 10 + sig as i64, u, u, acc(i), Transfer));
+        }
+        for i in 1..=11u8 {
+            sig += 1;
+            recs.push(recf(
+                sig,
+                sig,
+                100 + sig as i64,
+                acc(i),
+                acc(100 + i),
+                acc(240),
+                Transfer,
+            ));
+        }
+        let cl = cluster(&led(recs), &only_funder());
+        assert!(
+            !same(&cl, acc(101), acc(102)),
+            "oversized funder bucket is dropped as a shared service"
+        );
+    }
+
+    #[test]
+    fn funder_off_by_default() {
+        let (u, fp1, fp2, fp3, s1, s2, s3, d) = (
+            acc(100),
+            acc(1),
+            acc(2),
+            acc(3),
+            acc(11),
+            acc(12),
+            acc(13),
+            acc(50),
+        );
+        let recs = vec![
+            recf(1, 1, 10, u, u, fp1, Transfer),
+            recf(2, 2, 11, u, u, fp2, Transfer),
+            recf(3, 3, 12, u, u, fp3, Transfer),
+            recf(4, 4, 20, fp1, s1, d, Transfer),
+            recf(5, 5, 21, fp2, s2, d, Transfer),
+            recf(6, 6, 22, fp3, s3, d, Transfer),
+        ];
+        // Default config: funder graph disabled, unique fee-payers, so no cross-source union.
+        let cl = cluster(&led(recs), &AdversaryConfig::default());
+        assert!(!same(&cl, s1, s2), "funder graph is off by default");
+    }
+
+    #[test]
+    fn funder_never_reads_operator() {
+        // operator is None on every record, yet the union still happens — proof it is structural.
+        let (u, fp1, fp2, fp3, s1, s2, s3, d) = (
+            acc(100),
+            acc(1),
+            acc(2),
+            acc(3),
+            acc(11),
+            acc(12),
+            acc(13),
+            acc(50),
+        );
+        let recs = vec![
+            recf(1, 1, 10, u, u, fp1, Transfer),
+            recf(2, 2, 11, u, u, fp2, Transfer),
+            recf(3, 3, 12, u, u, fp3, Transfer),
+            recf(4, 4, 20, fp1, s1, d, Transfer),
+            recf(5, 5, 21, fp2, s2, d, Transfer),
+            recf(6, 6, 22, fp3, s3, d, Transfer),
+        ];
+        assert!(recs.iter().all(|r| r.operator.is_none()));
+        let cl = cluster(&led(recs), &only_funder());
+        assert!(same(&cl, s1, s3));
     }
 
     #[test]

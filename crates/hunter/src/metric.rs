@@ -40,6 +40,13 @@ pub struct Report {
     pub window_purity: f64,
     /// The window width this report was scored at (0 for identical-ts configs).
     pub window_secs: i64,
+    /// Inferred fee-payer funding transactions in the ledger (0 when funding is not modeled).
+    pub funding_records: usize,
+    /// Mean number of distinct operators hiding behind one funder (over funders of >= 2
+    /// fee-payers). 1.0 = each funder serves a single operator (a full leak); larger = fee-payers
+    /// hide among more operators (a shared relayer's anonymity set). The honest headline number
+    /// for the funding leak.
+    pub funder_anonymity_set: f64,
 }
 
 /// Number of unordered pairs in a set of `k` items, C(k, 2). `saturating_sub` gives 0 for
@@ -170,6 +177,38 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> R
         1.0
     };
 
+    // Funding-graph honesty numbers (ground-truth reads are legal in the metric layer). A
+    // funding tx has fee_payer == source (the funder signs its own top-up); real actions have a
+    // throwaway fee_payer != source. The anonymity set = distinct operators per funder.
+    let funding_records = ledger
+        .records
+        .iter()
+        .filter(|r| r.fee_payer == r.source && r.source != r.dest)
+        .count();
+    let mut fp_op: HashMap<AccountId, AgentId> = HashMap::new();
+    for r in &ledger.records {
+        if r.fee_payer != r.source {
+            if let Some(op) = r.operator {
+                fp_op.insert(r.fee_payer, op);
+            }
+        }
+    }
+    let mut anon_sizes: Vec<usize> = Vec::new();
+    for fps in crate::heuristics::funding_edges(&ledger.records).values() {
+        if fps.len() < 2 {
+            continue;
+        }
+        let ops: HashSet<AgentId> = fps.iter().filter_map(|fp| fp_op.get(fp).copied()).collect();
+        if !ops.is_empty() {
+            anon_sizes.push(ops.len());
+        }
+    }
+    let funder_anonymity_set = if anon_sizes.is_empty() {
+        1.0
+    } else {
+        anon_sizes.iter().sum::<usize>() as f64 / anon_sizes.len() as f64
+    };
+
     Report {
         num_accounts: ledger.accounts().len(),
         owned_accounts: accounts.len(),
@@ -182,6 +221,8 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> R
         largest_cluster_frac,
         window_purity,
         window_secs,
+        funding_records,
+        funder_anonymity_set,
     }
 }
 
@@ -276,6 +317,86 @@ mod tests {
             records: vec![owned(1, 1, 100, a, 0), owned(2, 2, 100, b, 1)],
         };
         assert!(evaluate(&contaminated, &empty, 0).burst_purity < 1.0);
+    }
+
+    #[test]
+    fn funder_anonymity_set_hub_vs_shared() {
+        // One funder serving two operators through two fee-payers => anonymity set 2.0.
+        let (u, fp1, fp2, s1, s2, d) = (acc(100), acc(1), acc(2), acc(11), acc(12), acc(50));
+        let recs = vec![
+            // funding txs: fee_payer == source == funder
+            TxRecord {
+                sig: 1,
+                slot: 1,
+                ts: 10,
+                fee_payer: u,
+                source: u,
+                dest: fp1,
+                amount: 5,
+                kind: ActionKind::Transfer,
+                operator: None,
+            },
+            TxRecord {
+                sig: 2,
+                slot: 2,
+                ts: 11,
+                fee_payer: u,
+                source: u,
+                dest: fp2,
+                amount: 5,
+                kind: ActionKind::Transfer,
+                operator: None,
+            },
+            // actions: fp1 pays for operator 0's s1; fp2 pays for operator 1's s2
+            TxRecord {
+                sig: 3,
+                slot: 3,
+                ts: 20,
+                fee_payer: fp1,
+                source: s1,
+                dest: d,
+                amount: 1,
+                kind: ActionKind::Transfer,
+                operator: Some(0),
+            },
+            TxRecord {
+                sig: 4,
+                slot: 4,
+                ts: 21,
+                fee_payer: fp2,
+                source: s2,
+                dest: d,
+                amount: 1,
+                kind: ActionKind::Transfer,
+                operator: Some(1),
+            },
+        ];
+        let empty = Clustering {
+            cluster_of: HashMap::new(),
+            sizes: vec![],
+        };
+        let r = evaluate(&Ledger { records: recs }, &empty, 120);
+        assert_eq!(r.funding_records, 2, "two funding txs inferred");
+        assert!(
+            (r.funder_anonymity_set - 2.0).abs() < 1e-9,
+            "one funder hides two operators => anon set 2.0, got {}",
+            r.funder_anonymity_set
+        );
+    }
+
+    #[test]
+    fn funder_fields_neutral_without_funding() {
+        let (a, b) = (acc(1), acc(2));
+        let ledger = Ledger {
+            records: vec![owned(1, 1, 100, a, 0), owned(2, 2, 200, b, 0)],
+        };
+        let empty = Clustering {
+            cluster_of: HashMap::new(),
+            sizes: vec![],
+        };
+        let r = evaluate(&ledger, &empty, 0);
+        assert_eq!(r.funding_records, 0);
+        assert!((r.funder_anonymity_set - 1.0).abs() < 1e-9);
     }
 
     #[test]

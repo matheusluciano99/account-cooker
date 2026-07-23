@@ -16,9 +16,12 @@ use persona::Persona;
 use rand::{RngExt, SeedableRng};
 use serde::{Deserialize, Serialize};
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeMap, BinaryHeap};
 
 pub mod durable;
+pub mod funding;
+
+pub use funding::{FundingConfig, FundingPolicy};
 
 #[cfg(feature = "live")]
 pub mod live;
@@ -93,6 +96,9 @@ pub struct SimConfig {
     /// agent clock, whole action stamped at one ts). No effect on `Mode::Naive`.
     pub harden_timing: bool,
     pub hardening: HardeningConfig,
+    /// Curupira-only: model where fee-payer SOL comes from as a post-pass over the finished
+    /// ledger. `None` (default) is byte-identical to the pre-funding engine.
+    pub funding: Option<FundingConfig>,
 }
 
 /// Tunables for the hardened Curupira path.
@@ -133,6 +139,7 @@ impl Default for SimConfig {
             num_external: 40,
             harden_timing: true,
             hardening: HardeningConfig::default(),
+            funding: None,
         }
     }
 }
@@ -343,7 +350,24 @@ pub(crate) fn run_core(st: &mut RunState, sink: &mut dyn DurSink) -> std::io::Re
 pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
     let mut st = build_fresh(personas, cfg);
     run_core(&mut st, &mut NullSink).expect("NullSink never fails");
-    st.chain.ledger
+    finalize_funding(st, cfg)
+}
+
+/// Map each agent to its hub (`main`) account, used by the `OperatorHub` funding policy.
+pub(crate) fn hubs_of(agents: &[Agent]) -> BTreeMap<AgentId, AccountId> {
+    agents.iter().map(|a| (a.id, a.main)).collect()
+}
+
+/// Apply the funding post-pass (if configured) and return the final ledger. A no-op when
+/// `cfg.funding` is `None`, so the returned ledger is byte-identical to the base run.
+pub(crate) fn finalize_funding(st: RunState, cfg: &SimConfig) -> Ledger {
+    if cfg.funding.is_none() {
+        return st.chain.ledger;
+    }
+    let hubs = hubs_of(&st.agents);
+    let mut ledger = st.chain.ledger;
+    funding::apply_funding(&mut ledger, &hubs, cfg);
+    ledger
 }
 
 fn perform_action(

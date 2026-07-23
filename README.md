@@ -90,10 +90,54 @@ proven to crush both the naive and the un-hardened fleet at 1.00, hardened Curup
 at **0.14 with the residual identified and explained** — an 86% reduction, at precision
 1.00, so the adversary isn't inflating recall with giant blobs. The window sweep shows
 the precision/recall trade a real analyst faces; that trade is the honest ceiling on what
-noise leaves behind. O Caçador still lacks graph-connectivity, ML clustering and
-funding-graph analysis — see the [threat model](#threat-model-what-this-does-not-do) —
-and every time it gets stronger, these numbers get re-measured. That closed loop is the
-whole point of the harness.
+noise leaves behind. But 0.14 is only honest against the attacks O Caçador runs — and the
+demo now runs one more.
+
+## The funding graph — where the 0.14 comes undone
+
+Timing hardening decorrelates *when* your fee-payers act. It says nothing about *where their
+SOL comes from*. Every throwaway fee-payer must be funded before it can pay, and that funding
+transaction is on-chain. If they all trace back to one operator-owned wallet, an analyst walks
+the common-funder graph and re-links the whole fleet — fee-payer rotation buys nothing. O
+Caçador v4 models this and measures it (`--funding`, and the funder-aware adversary):
+
+```
+  -- v4: fee-payer funding (the leak timing hardening cannot fix) --
+  funding policy                F1    prec   largest    anon
+  ----------------------------------------------------------
+  off (not modeled)           0.14    1.00      0.05     1.0
+  operator-hub                1.00    1.00      0.11     1.0
+  dedicated-funder            1.00    1.00      0.10     1.0
+  relayers k=12               0.77    1.00      0.11     1.5
+
+  shared relayer pool sweep (hardened Curupira, funder-aware adversary):
+  pool size K             F1    prec  recall    anon
+  --------------------------------------------------
+  k=1                  0.14    1.00    0.08    12.0
+  k=2                  0.26    0.53    0.17     6.0
+  k=3                  0.14    1.00    0.08     4.0
+  k=6                  0.44    0.68    0.32     2.4
+  k=12                 0.77    1.00    0.62     1.5
+```
+
+- **off** — the 0.14 residual, funding invisible. This is the optimistic number.
+- **operator-hub / dedicated-funder** — fund the throwaways from an operator-owned wallet and
+  the funder graph sends attribution straight back to **F1 1.00 at precision 1.00**. One hop of
+  indirection (a dedicated funder) buys *nothing* — the funder is still owned, so the harness
+  unions it right back in. **Timing hardening's win evaporates.**
+- **shared relayer pool** — fund from `K` relayers shared across all operators and the residual
+  is governed by the **anonymity set ≈ operators/K** (the `anon` column): each relayer's clients
+  hide among each other. Shrink `K` and attribution falls, but once a relayer serves more sources
+  than the analyst's shared-service cap it is dropped entirely — you have become a mixer. That is
+  `mirror-pool`'s trusted-pool problem, reached from the other direction. (Numbers are the sticky
+  client→relayer model; the mid-`K` precision dips are two operators honestly colliding under one
+  relayer, printed rather than smoothed.)
+
+The honest finding: **fee-payer rotation is cosmetic unless the funding is decorrelated too, and
+the only thing that decorrelates it is an anonymity set you share with other operators.** That is
+not a bug in Curupira — it is the measured price of privacy-through-noise, and naming it is the
+whole point of shipping the adversary alongside the engine. Every time O Caçador gets stronger,
+these numbers get re-measured. See the [threat model](#threat-model-what-this-does-not-do).
 
 ## Architecture
 
@@ -104,7 +148,7 @@ the chain integration is isolated behind a feature flag.
 |---|---|---|
 | `noise-core` | value splitting, human (circadian/Poisson) timing, ephemeral/stealth address derivation (curve25519), decoy policy | `rand`, `curve25519-dalek`, `sha2` |
 | `persona` | declarative behavior profiles (retail / whale / market-maker) in TOML | `rand`, `toml` |
-| `hunter` | **O Caçador** — clustering adversary (fee-payer linkage, co-spend, temporal peel-chain, burst co-payment/co-activity, Δt-window re-bucketing) + honesty metrics (F1, precision, recall, fragmentation, purity, largest-cluster share) | `serde` |
+| `hunter` | **O Caçador** — clustering adversary (fee-payer linkage, co-spend, temporal peel-chain, burst co-payment/co-activity, Δt-window re-bucketing, common-funder graph) + honesty metrics (F1, precision, recall, fragmentation, purity, largest-cluster share, funder anonymity set) | `serde` |
 | `adapters` | `ProtocolAdapter` trait + Transfer/Stake/Swap/Memo. New protocol = one impl | `rand` |
 | `agent-runtime` | fleet orchestrator + timing hardening; `MockChain` (offline, deterministic) by default, real Solana under `--features live`; crash-safe journal/checkpoint runs (`durable`) | `chacha20` (checkpointable RNG); `solana-*` under `live` |
 | `curupira-cli` | `demo` / `dump` / `run` (durable, resumable) / `report` / `personas` | `clap` |
@@ -115,8 +159,8 @@ demo is reproducible on any machine with no validator** — the property judges 
 ## Quickstart
 
 ```bash
-cargo test --all                    # 49 tests, pure logic — no network needed
-cargo run --bin curupira -- demo    # the arms-race matrix above
+cargo test --all                    # 65 tests, pure logic — no network needed
+cargo run --bin curupira -- demo    # the arms-race matrix + funding graph above
 
 # durable fleet run — journal + checkpoint; SIGKILL it, then resume:
 cargo run --bin curupira -- run --dir /tmp/run --out ledger.json
@@ -128,9 +172,9 @@ cargo test --all --release -- --ignored
 # export the built-in personas and tweak them (the "trivially customizable" part)
 cargo run --bin curupira -- personas --out-dir personas
 
-# dump an observable ledger and score it independently
-cargo run --bin curupira -- dump --mode curupira --out ledger.json
-cargo run --bin curupira -- report --ledger ledger.json
+# model fee-payer funding, then score it with the common-funder heuristic:
+cargo run --bin curupira -- dump --mode curupira --funding hub --out ledger.json
+cargo run --bin curupira -- report --ledger ledger.json --funder-aware
 ```
 
 ### Live mode (real Solana)
@@ -184,6 +228,9 @@ reads**; it exists only so we can score the adversary's guess.
   adversary's biggest cluster; another guard against degenerate giant-blob clusterings.
 - **burst / window purity** — fraction of same-timestamp (or same-Δt-bucket) groups
   containing a single operator: how much the timing channel alone leaks.
+- **funder anonymity set** — mean number of distinct operators hiding behind one funder.
+  `1.0` = each funder serves a single operator (a full funding-graph leak); larger = more
+  operators share a funder (a relayer pool's anonymity set). The headline funding number.
 
 ## Threat model (what this does NOT do)
 
@@ -197,30 +244,35 @@ encryption and not a mixer.
   why the harness exists — to catch overclaiming.
 - **Timing jitter is weak on Solana** (deterministic leader schedule, low latency). Its
   value is degrading cross-tx temporal correlation, not hiding a single tx.
-- **Fee-payer rotation has a cost.** Thousands of single-use fee-payers must be funded,
-  and _mass single-use fee-payers are themselves a fingerprint_. A production design uses
-  a bounded pool of funded relayers (which drifts toward `mirror-pool` territory) or funds
-  from a shielded source.
+- **Fee-payer rotation has a cost, and it is now measured.** Thousands of single-use
+  fee-payers must be funded, and O Caçador v4 scores that funding graph: fund them from an
+  operator-owned wallet and attribution returns to F1 1.00 regardless of timing hardening
+  (see [The funding graph](#the-funding-graph--where-the-014-comes-undone)). The only
+  mitigation is a bounded relayer pool whose privacy is an anonymity set of ~operators/K —
+  which drifts toward `mirror-pool` territory. The residual there also depends on the
+  analyst's shared-service cap; a stronger analyst subdivides a large relayer bucket by
+  amount/timing rather than dropping it, so the small-`K` residual is a floor, not a promise.
 - **Graph analysis still applies.** O Caçador covers burst and Δt-window timing attacks,
   but not yet generic transaction-graph connectivity or ML behavioral clustering; a
   stronger adversary — or simply a bigger, longer-running fleet (F1 0.38 at 1,000
   agents × 14 days) — recovers more than the 12-agent demo's 0.14. Strengthening the
   adversary is the honesty roadmap, not an afterthought.
-- **The funding graph is the current blind spot.** The simulator does not model where
-  fee-payer SOL comes from, so the single strongest real-world clustering signal — the
-  common-funder graph — cannot be scored by this harness yet. Treat every number here
-  as a lower bound on linkability, not a guarantee.
+- **The funding graph is modeled, not solved.** O Caçador v4 scores the common-funder
+  graph (the leak the strongest competing work flags but does not close), so the headline
+  numbers now account for it. What remains unmodeled is the funder's *own* funding — a real
+  analyst walks up the graph to the exchange/faucet that funded the funder. Treat every
+  number here as a lower bound on linkability, not a guarantee.
 - **Network metadata de-anonymizes** (RPC IP) regardless of on-chain perfection. Out of
   scope here; do not assume end-to-end anonymity.
 
 ## Roadmap
 
-- **O Caçador v4:** model fee-payer funding in the simulator + a common-funder graph
-  heuristic (closes the blind spot above), then transaction-graph connectivity and ML
-  clustering — and every upgrade re-measures the headline numbers.
+- **O Caçador v5:** multi-hop funding-graph walking (up to the exchange/faucet that funded
+  the funder), transaction-graph connectivity, and ML clustering — every upgrade re-measures
+  the headline numbers.
 - **Live wiring:** fund-and-rotate fee-payers, priority fees, retries; real Jupiter/stake
   adapters on devnet/localnet.
-- **Funding realism:** bounded funded relayer pool + cost accounting.
+- **Funding realism:** per-use (non-sticky) relayer selection + cost accounting.
 - **Composability:** expose `noise-core` for the `supersonic-tx` bounty (route cooked
   casts through it).
 

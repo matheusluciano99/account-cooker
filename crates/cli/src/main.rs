@@ -9,11 +9,24 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use agent_runtime::durable::{resume_durable, simulate_durable, DurabilityOpts};
-use agent_runtime::{simulate, Mode, SimConfig};
+use agent_runtime::{simulate, FundingConfig, FundingPolicy, Mode, SimConfig};
 use hunter::model::Ledger;
 use hunter::{analyze, AdversaryConfig, Report};
 use persona::Persona;
 use std::path::Path;
+
+/// Parse a `--funding` value into an optional policy. `off` (default) models no funding;
+/// `relayers` uses `--relayers K`.
+fn parse_funding(kind: &str, relayers: usize) -> Result<Option<FundingConfig>> {
+    let policy = match kind.to_lowercase().as_str() {
+        "off" => return Ok(None),
+        "hub" => FundingPolicy::OperatorHub,
+        "dedicated" => FundingPolicy::DedicatedFunder,
+        "relayers" => FundingPolicy::SharedRelayers { k: relayers.max(1) },
+        other => anyhow::bail!("unknown --funding '{other}' (off|hub|dedicated|relayers)"),
+    };
+    Ok(Some(FundingConfig::new(policy)))
+}
 
 #[derive(Parser)]
 #[command(
@@ -53,6 +66,12 @@ enum Cmd {
         seed: u64,
         #[arg(long, default_value_t = 40)]
         external: usize,
+        /// Model fee-payer funding: off (default) | hub | dedicated | relayers.
+        #[arg(long, default_value = "off")]
+        funding: String,
+        /// Relayer pool size when --funding relayers.
+        #[arg(long, default_value_t = 4)]
+        relayers: usize,
         #[arg(long)]
         out: String,
     },
@@ -84,11 +103,20 @@ enum Cmd {
         /// Skip fsync (faster, but not crash-durable across power loss). Default: fsync on.
         #[arg(long, default_value_t = false)]
         no_fsync: bool,
+        /// Model fee-payer funding: off (default) | hub | dedicated | relayers.
+        #[arg(long, default_value = "off")]
+        funding: String,
+        /// Relayer pool size when --funding relayers.
+        #[arg(long, default_value_t = 4)]
+        relayers: usize,
     },
     /// Score an existing ledger JSON with the adversarial harness.
     Report {
         #[arg(long)]
         ledger: String,
+        /// Also run the common-funder heuristic (for ledgers with modeled funding).
+        #[arg(long, default_value_t = false)]
+        funder_aware: bool,
     },
     /// Write the built-in personas to TOML files so they can be customized.
     Personas {
@@ -112,8 +140,12 @@ fn main() -> Result<()> {
             days,
             seed,
             external,
+            funding,
+            relayers,
             out,
-        } => dump(&mode, agents, days, seed, external, &out),
+        } => dump(
+            &mode, agents, days, seed, external, &funding, relayers, &out,
+        ),
         Cmd::Run {
             mode,
             agents,
@@ -125,6 +157,8 @@ fn main() -> Result<()> {
             resume,
             checkpoint_every,
             no_fsync,
+            funding,
+            relayers,
         } => run_durable(
             &mode,
             agents,
@@ -136,8 +170,13 @@ fn main() -> Result<()> {
             resume,
             checkpoint_every,
             !no_fsync,
+            &funding,
+            relayers,
         ),
-        Cmd::Report { ledger } => report(&ledger),
+        Cmd::Report {
+            ledger,
+            funder_aware,
+        } => report(&ledger, funder_aware),
         Cmd::Personas { out_dir } => write_personas(&out_dir),
     }
 }
@@ -271,8 +310,93 @@ fn demo(agents: usize, days: i64, seed: u64, external: usize) -> Result<()> {
     println!();
     verdict(&n_w, &h_w, &h_x);
     ablation(&hardened);
+    funding_section(&personas, &base, agents);
     println!();
     Ok(())
+}
+
+/// v4: model where fee-payer SOL comes from and score with the funder-aware adversary. Shows
+/// that timing hardening's win evaporates once funding is visible, and how a shared relayer pool
+/// buys it back as an anonymity set of ~operators/K.
+fn funding_section(personas: &[Persona], base: &SimConfig, agents: usize) {
+    let adv = AdversaryConfig::funder_aware(120);
+    let hardened_funded = |policy: FundingPolicy| -> Report {
+        let cfg = SimConfig {
+            mode: Mode::Curupira,
+            harden_timing: true,
+            funding: Some(FundingConfig::new(policy)),
+            ..base.clone()
+        };
+        analyze(&simulate(personas, &cfg), &adv).1
+    };
+
+    println!();
+    println!("  -- v4: fee-payer funding (the leak timing hardening cannot fix) --");
+    println!(
+        "  {:<24}{:>8}{:>8}{:>10}{:>8}",
+        "funding policy", "F1", "prec", "largest", "anon"
+    );
+    println!("  {}", "-".repeat(58));
+    // Baseline: hardened, funding not modeled, scored by the same funder-aware adversary.
+    let off = {
+        let cfg = SimConfig {
+            mode: Mode::Curupira,
+            harden_timing: true,
+            funding: None,
+            ..base.clone()
+        };
+        analyze(&simulate(personas, &cfg), &adv).1
+    };
+    let row = |label: &str, r: &Report| {
+        println!(
+            "  {:<24}{:>8.2}{:>8.2}{:>10.2}{:>8.1}",
+            label,
+            r.attribution_f1,
+            r.attribution_precision,
+            r.largest_cluster_frac,
+            r.funder_anonymity_set
+        );
+    };
+    row("off (not modeled)", &off);
+    row("operator-hub", &hardened_funded(FundingPolicy::OperatorHub));
+    row(
+        "dedicated-funder",
+        &hardened_funded(FundingPolicy::DedicatedFunder),
+    );
+    row(
+        &format!("relayers k={agents}"),
+        &hardened_funded(FundingPolicy::SharedRelayers { k: agents }),
+    );
+
+    // Relayer-pool sweep: shrink K and watch attribution trade against the anonymity set.
+    println!();
+    println!("  shared relayer pool sweep (hardened Curupira, funder-aware adversary):");
+    println!(
+        "  {:<18}{:>8}{:>8}{:>8}{:>8}",
+        "pool size K", "F1", "prec", "recall", "anon"
+    );
+    println!("  {}", "-".repeat(50));
+    let mut ks = vec![1usize, 2, 3, agents / 2, agents];
+    ks.retain(|&k| k >= 1);
+    ks.dedup();
+    for k in ks {
+        let r = hardened_funded(FundingPolicy::SharedRelayers { k });
+        println!(
+            "  k={:<15}{:>8.2}{:>8.2}{:>8.2}{:>8.1}",
+            k, r.attribution_f1, r.attribution_precision, r.linkage_recall, r.funder_anonymity_set
+        );
+    }
+    println!("  Reading: fee-payer rotation hides nothing from the funding graph — operator-hub");
+    println!(
+        "  and dedicated-funder funding are re-identified at high precision. A shared relayer"
+    );
+    println!(
+        "  pool trades attribution for an anonymity set of ~operators/K; once a relayer serves"
+    );
+    println!(
+        "  more sources than the analyst's shared-service cap it is dropped (you have become a"
+    );
+    println!("  mixer — mirror-pool territory). Assumes sticky client->relayer assignment.");
 }
 
 /// Sweep the windowed adversary's width against the hardened ledger and print F1 /
@@ -343,13 +467,24 @@ fn verdict(naive_w: &Report, hardened_w: &Report, hardened_x: &Report) {
     }
 }
 
-fn dump(mode: &str, agents: usize, days: i64, seed: u64, external: usize, out: &str) -> Result<()> {
+#[allow(clippy::too_many_arguments)]
+fn dump(
+    mode: &str,
+    agents: usize,
+    days: i64,
+    seed: u64,
+    external: usize,
+    funding: &str,
+    relayers: usize,
+    out: &str,
+) -> Result<()> {
     let m = match mode.to_lowercase().as_str() {
         "naive" => Mode::Naive,
         _ => Mode::Curupira,
     };
     let cfg = SimConfig {
         mode: m,
+        funding: parse_funding(funding, relayers)?,
         ..base_cfg(agents, days, seed, external)
     };
     let ledger = simulate(&Persona::presets(), &cfg);
@@ -371,6 +506,8 @@ fn run_durable(
     resume: bool,
     checkpoint_every: u64,
     fsync: bool,
+    funding: &str,
+    relayers: usize,
 ) -> Result<()> {
     let m = match mode.to_lowercase().as_str() {
         "naive" => Mode::Naive,
@@ -378,6 +515,7 @@ fn run_durable(
     };
     let cfg = SimConfig {
         mode: m,
+        funding: parse_funding(funding, relayers)?,
         ..base_cfg(agents, days, seed, external)
     };
     let personas = Persona::presets();
@@ -400,11 +538,15 @@ fn run_durable(
     Ok(())
 }
 
-fn report(path: &str) -> Result<()> {
+fn report(path: &str, funder_aware: bool) -> Result<()> {
     let raw = std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?;
     let ledger: Ledger = serde_json::from_str(&raw).context("parsing ledger JSON")?;
-    // Score with the windowed adversary.
-    let (_, r) = analyze(&ledger, &AdversaryConfig::windowed(120));
+    let adv = if funder_aware {
+        AdversaryConfig::funder_aware(120)
+    } else {
+        AdversaryConfig::windowed(120)
+    };
+    let (_, r) = analyze(&ledger, &adv);
     println!("{}", serde_json::to_string_pretty(&r)?);
     Ok(())
 }
