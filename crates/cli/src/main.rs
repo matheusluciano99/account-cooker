@@ -33,6 +33,10 @@ enum Cmd {
         days: i64,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// Size of the shared external counterparty pool. Scale it with the fleet
+        /// (e.g. ~4x agents) at large scale so a fixed pool doesn't crowd copay buckets.
+        #[arg(long, default_value_t = 40)]
+        external: usize,
     },
     /// Simulate one fleet and write the observable ledger to a JSON file.
     Dump {
@@ -44,6 +48,8 @@ enum Cmd {
         days: i64,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        #[arg(long, default_value_t = 40)]
+        external: usize,
         #[arg(long)]
         out: String,
     },
@@ -62,14 +68,20 @@ enum Cmd {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Demo { agents, days, seed } => demo(agents, days, seed),
+        Cmd::Demo {
+            agents,
+            days,
+            seed,
+            external,
+        } => demo(agents, days, seed, external),
         Cmd::Dump {
             mode,
             agents,
             days,
             seed,
+            external,
             out,
-        } => dump(&mode, agents, days, seed, &out),
+        } => dump(&mode, agents, days, seed, external, &out),
         Cmd::Report { ledger } => report(&ledger),
         Cmd::Personas { out_dir } => write_personas(&out_dir),
     }
@@ -86,18 +98,19 @@ fn write_personas(out_dir: &str) -> Result<()> {
     Ok(())
 }
 
-fn base_cfg(agents: usize, days: i64, seed: u64) -> SimConfig {
+fn base_cfg(agents: usize, days: i64, seed: u64, external: usize) -> SimConfig {
     SimConfig {
         num_agents: agents,
         duration_secs: days.max(1) * 86_400,
         seed,
+        num_external: external.max(1),
         ..SimConfig::default()
     }
 }
 
-fn demo(agents: usize, days: i64, seed: u64) -> Result<()> {
+fn demo(agents: usize, days: i64, seed: u64, external: usize) -> Result<()> {
     let personas = Persona::presets();
-    let base = base_cfg(agents, days, seed);
+    let base = base_cfg(agents, days, seed, external);
     // Three ledgers: naive baseline, hardened Curupira (default), and legacy (un-hardened).
     let naive = simulate(&personas, &SimConfig { mode: Mode::Naive, ..base.clone() });
     let hardened = simulate(
@@ -224,14 +237,14 @@ fn verdict(naive_w: &Report, hardened_w: &Report, hardened_x: &Report) {
     }
 }
 
-fn dump(mode: &str, agents: usize, days: i64, seed: u64, out: &str) -> Result<()> {
+fn dump(mode: &str, agents: usize, days: i64, seed: u64, external: usize, out: &str) -> Result<()> {
     let m = match mode.to_lowercase().as_str() {
         "naive" => Mode::Naive,
         _ => Mode::Curupira,
     };
     let cfg = SimConfig {
         mode: m,
-        ..base_cfg(agents, days, seed)
+        ..base_cfg(agents, days, seed, external)
     };
     let ledger = simulate(&Persona::presets(), &cfg);
     let json = serde_json::to_string_pretty(&ledger)?;

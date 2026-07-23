@@ -42,35 +42,37 @@ pub struct Report {
     pub window_secs: i64,
 }
 
+/// Number of unordered pairs in a set of `k` items, C(k, 2). `saturating_sub` gives 0 for
+/// `k == 0` (no debug-mode underflow) and matches `k*(k-1)/2` for `k >= 1`.
+#[inline]
+fn c2(k: u64) -> u64 {
+    k * k.saturating_sub(1) / 2
+}
+
 /// Score a clustering against the ledger's ground truth. `window_secs` selects the window
 /// used for `window_purity` (0 = identical-ts); it does not affect the clustering itself.
 pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> Report {
     let owner = ledger.ownership();
     let accounts: Vec<AccountId> = owner.keys().copied().collect();
 
-    // Pairwise confusion over operator-owned accounts.
-    let (mut tp, mut fp, mut fn_) = (0u64, 0u64, 0u64);
-    let (mut same_op_pairs, mut linked_same_op) = (0u64, 0u64);
-    for i in 0..accounts.len() {
-        for j in (i + 1)..accounts.len() {
-            let a = accounts[i];
-            let b = accounts[j];
-            let truth_same = owner[&a] == owner[&b];
-            let pred_same = clustering.cluster_of.get(&a) == clustering.cluster_of.get(&b);
-            if truth_same {
-                same_op_pairs += 1;
-                if pred_same {
-                    linked_same_op += 1;
-                }
-            }
-            match (truth_same, pred_same) {
-                (true, true) => tp += 1,
-                (false, true) => fp += 1,
-                (true, false) => fn_ += 1,
-                (false, false) => {}
-            }
-        }
+    // Pairwise confusion over owned accounts via a (operator, predicted-cluster) contingency
+    // table: same-operator-and-same-cluster pairs are true positives, and the marginals give
+    // the predicted-positive and same-operator totals.
+    let mut cell: HashMap<(AgentId, Option<usize>), u64> = HashMap::new();
+    let mut per_op: HashMap<AgentId, u64> = HashMap::new();
+    let mut per_cluster: HashMap<Option<usize>, u64> = HashMap::new();
+    for (&acc, &op) in &owner {
+        let c = clustering.cluster_of.get(&acc).copied();
+        *cell.entry((op, c)).or_insert(0) += 1;
+        *per_op.entry(op).or_insert(0) += 1;
+        *per_cluster.entry(c).or_insert(0) += 1;
     }
+    let tp: u64 = cell.values().map(|&k| c2(k)).sum();
+    let pred_pos: u64 = per_cluster.values().map(|&k| c2(k)).sum();
+    let same_op_pairs: u64 = per_op.values().map(|&k| c2(k)).sum();
+    let fp = pred_pos - tp;
+    let fn_ = same_op_pairs - tp;
+    let linked_same_op = tp;
 
     let precision = if tp + fp > 0 {
         tp as f64 / (tp + fp) as f64
@@ -123,24 +125,20 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> R
     // in the scoring layer, never in a heuristic.
     let (mut pure_pairs, mut total_pairs) = (0u64, 0u64);
     for burst in crate::heuristics::burst_groups(&ledger.records) {
-        let mut seen = HashSet::new();
-        let mut op_of_source: Vec<AgentId> = Vec::new();
+        let mut seen: HashSet<AccountId> = HashSet::new();
+        let mut cnt: HashMap<AgentId, u64> = HashMap::new();
+        let mut m: u64 = 0;
         for &ix in &burst {
             let r = &ledger.records[ix];
             if let Some(op) = r.operator {
                 if seen.insert(r.source) {
-                    op_of_source.push(op);
+                    *cnt.entry(op).or_insert(0) += 1;
+                    m += 1;
                 }
             }
         }
-        for i in 0..op_of_source.len() {
-            for j in (i + 1)..op_of_source.len() {
-                total_pairs += 1;
-                if op_of_source[i] == op_of_source[j] {
-                    pure_pairs += 1;
-                }
-            }
-        }
+        total_pairs += c2(m);
+        pure_pairs += cnt.values().map(|&c| c2(c)).sum::<u64>();
     }
     let burst_purity = if total_pairs > 0 {
         pure_pairs as f64 / total_pairs as f64
@@ -151,24 +149,20 @@ pub fn evaluate(ledger: &Ledger, clustering: &Clustering, window_secs: i64) -> R
     // Window purity — the same measure over Δt windows.
     let (mut pure_w, mut total_w) = (0u64, 0u64);
     for group in crate::heuristics::window_groups(&ledger.records, window_secs) {
-        let mut seen = HashSet::new();
-        let mut ops: Vec<AgentId> = Vec::new();
+        let mut seen: HashSet<AccountId> = HashSet::new();
+        let mut cnt: HashMap<AgentId, u64> = HashMap::new();
+        let mut m: u64 = 0;
         for &ix in &group {
             let r = &ledger.records[ix];
             if let Some(op) = r.operator {
                 if seen.insert(r.source) {
-                    ops.push(op);
+                    *cnt.entry(op).or_insert(0) += 1;
+                    m += 1;
                 }
             }
         }
-        for i in 0..ops.len() {
-            for j in (i + 1)..ops.len() {
-                total_w += 1;
-                if ops[i] == ops[j] {
-                    pure_w += 1;
-                }
-            }
-        }
+        total_w += c2(m);
+        pure_w += cnt.values().map(|&c| c2(c)).sum::<u64>();
     }
     let window_purity = if total_w > 0 {
         pure_w as f64 / total_w as f64

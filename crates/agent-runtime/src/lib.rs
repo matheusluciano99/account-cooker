@@ -14,6 +14,8 @@ use noise_core::types::{AccountId, ActionKind};
 use persona::Persona;
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 
 #[cfg(feature = "live")]
 pub mod live;
@@ -218,20 +220,17 @@ pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
     let mut chain = MockChain::new(cfg.start_ts);
     let end = cfg.start_ts + cfg.duration_secs;
 
-    // Discrete-event loop: always advance the earliest-scheduled entry. Strict `<` picks
-    // the first minimum, keeping the pick order (and RNG draw order) deterministic.
-    loop {
-        let (mut pick, mut best) = (None, i64::MAX);
-        for (i, s) in sched.iter().enumerate() {
-            if s.next_at < best {
-                best = s.next_at;
-                pick = Some(i);
-            }
+    // Discrete-event loop over a min-heap keyed on (next_at, sched index). `Reverse` makes
+    // `BinaryHeap` pop the earliest next_at, then the lowest index — the same order the
+    // linear scan produced, so RNG draw order (and the ledger) is unchanged.
+    let mut heap: BinaryHeap<Reverse<(i64, usize)>> = BinaryHeap::with_capacity(sched.len());
+    for (i, s) in sched.iter().enumerate() {
+        heap.push(Reverse((s.next_at, i)));
+    }
+    while let Some(Reverse((best, si))) = heap.pop() {
+        if best > end {
+            break;
         }
-        let si = match pick {
-            Some(i) if best <= end => i,
-            _ => break,
-        };
         let (agent_idx, sub_idx) = (sched[si].agent_idx, sched[si].sub_idx);
         chain.set_time(best);
         match sub_idx {
@@ -242,7 +241,7 @@ pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
                     .persona
                     .circadian
                     .next_delay_secs(sod, &mut rng) as i64;
-                sched[si].next_at = best + d.max(1);
+                heap.push(Reverse((best + d.max(1), si)));
             }
             Some(k) => {
                 perform_action_hardened(&mut chain, &agents[agent_idx], k, &externals, cfg, &mut rng);
@@ -255,7 +254,7 @@ pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
                 if cfg.hardening.hold_aggregate_rate {
                     d *= agents[agent_idx].subaccounts.len() as i64;
                 }
-                sched[si].next_at = best + d.max(1);
+                heap.push(Reverse((best + d.max(1), si)));
             }
         }
     }
@@ -654,5 +653,60 @@ mod tests {
             assert_eq!(r1.attribution_precision, r2.attribution_precision);
             assert_eq!(r1.window_purity, r2.window_purity);
         }
+    }
+
+    // Heavy; excluded from the default suite. Run with:
+    //   cargo test -p agent-runtime --release -- --ignored scale
+    #[test]
+    #[ignore]
+    fn scale_1000_agents_14_days() {
+        use std::time::Instant;
+        let personas = Persona::presets();
+        // External pool scales with the fleet so a fixed pool doesn't crowd copay buckets.
+        let base = SimConfig {
+            num_agents: 1000,
+            duration_secs: 14 * 86_400,
+            num_external: 4000,
+            ..SimConfig::default()
+        };
+        let t0 = Instant::now();
+        let naive = simulate(&personas, &SimConfig { mode: Mode::Naive, ..base.clone() });
+        let hardened = simulate(&personas, &SimConfig { mode: Mode::Curupira, harden_timing: true, ..base.clone() });
+        let hardened2 = simulate(&personas, &SimConfig { mode: Mode::Curupira, harden_timing: true, ..base.clone() });
+
+        assert!(hardened.records.len() > 1_000_000, "expected millions of records, got {}", hardened.records.len());
+        assert_eq!(hardened.records.len(), hardened2.records.len());
+
+        let win = AdversaryConfig::windowed(120);
+        let (_, n_win) = analyze(&naive, &win);
+        let (_, h_win) = analyze(&hardened, &win);
+        let (_, h2_win) = analyze(&hardened2, &win);
+        let elapsed = t0.elapsed();
+        println!(
+            "scale: {} records, naive f1 {:.2}, hardened f1 {:.2}, {:?}",
+            hardened.records.len(),
+            n_win.attribution_f1,
+            h_win.attribution_f1,
+            elapsed
+        );
+
+        // Determinism at scale (bit-identical).
+        assert_eq!(h_win.attribution_f1.to_bits(), h2_win.attribution_f1.to_bits());
+        assert_eq!(h_win.num_clusters, h2_win.num_clusters);
+
+        // Structural arms-race invariants (scale-invariant — NOT the 12-agent constants).
+        assert!(n_win.attribution_f1 > 0.9, "naive windowed f1 {}", n_win.attribution_f1);
+        assert!(h_win.attribution_f1 > 0.0, "hardened residual must be nonzero {}", h_win.attribution_f1);
+        assert!(
+            h_win.attribution_f1 < n_win.attribution_f1 - 0.30,
+            "gap to naive too small: hardened {} vs naive {}",
+            h_win.attribution_f1,
+            n_win.attribution_f1
+        );
+        assert!(h_win.attribution_precision >= 0.80, "precision {}", h_win.attribution_precision);
+        assert!(h_win.largest_cluster_frac < 0.5, "lcf {}", h_win.largest_cluster_frac);
+
+        // Generous guard against a regression back to super-linear behavior.
+        assert!(elapsed.as_secs() < 600, "scale run took {:?} — possible O(n^2) regression", elapsed);
     }
 }

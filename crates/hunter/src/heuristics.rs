@@ -304,28 +304,40 @@ pub fn cluster(ledger: &Ledger, cfg: &AdversaryConfig) -> Clustering {
     }
 
     // (3) Temporal + amount correlation (peel-chain). Value leaves A, near-equal value
-    // reaches B within the window, and A's destination is B => link A and B.
+    // reaches B within the window, and A's destination is B => link A and B. Candidate `b`s
+    // are indexed by `b.source` (which must equal `a.dest`) and range-searched by ts.
     if cfg.use_temporal_amount {
         let txs: Vec<&TxRecord> = ledger
             .records
             .iter()
             .filter(|r| matches!(r.kind, ActionKind::Transfer | ActionKind::Swap))
             .collect();
+
+        let mut by_source: HashMap<AccountId, Vec<(i64, u64, u64, AccountId)>> = HashMap::new();
+        for b in &txs {
+            by_source
+                .entry(b.source)
+                .or_default()
+                .push((b.ts, b.amount, b.sig, b.dest));
+        }
+        for v in by_source.values_mut() {
+            v.sort_by_key(|&(ts, _amt, sig, _dest)| (ts, sig));
+        }
+
         for a in &txs {
-            for b in &txs {
-                if a.sig == b.sig {
+            let bucket = match by_source.get(&a.dest) {
+                Some(v) => v,
+                None => continue,
+            };
+            let lo = bucket.partition_point(|&(ts, ..)| ts < a.ts);
+            let hi = bucket.partition_point(|&(ts, ..)| ts <= a.ts + cfg.temporal_window_secs);
+            let tol = (a.amount as u128 * cfg.amount_tolerance_bps as u128 / 10_000) as u64;
+            for &(_bts, bamt, bsig, bdest) in &bucket[lo..hi] {
+                if a.sig == bsig {
                     continue;
                 }
-                let dt = b.ts - a.ts;
-                if dt < 0 || dt > cfg.temporal_window_secs {
-                    continue;
-                }
-                if a.dest != b.source {
-                    continue;
-                }
-                let tol = (a.amount as u128 * cfg.amount_tolerance_bps as u128 / 10_000) as u64;
-                if a.amount.abs_diff(b.amount) <= tol {
-                    uf.union(a.source, b.dest);
+                if a.amount.abs_diff(bamt) <= tol {
+                    uf.union(a.source, bdest);
                 }
             }
         }
@@ -810,5 +822,34 @@ mod tests {
         }
         let cl = cluster(&led(recs), &win_only(true, false, 120));
         assert!(!same(&cl, acc(1), acc(2)), "an 11-source window bucket is dropped");
+    }
+
+    fn only_temporal() -> AdversaryConfig {
+        AdversaryConfig {
+            use_fee_payer: false,
+            use_cospend: false,
+            use_temporal_amount: true,
+            use_burst_copay: false,
+            use_burst_coactivity: false,
+            ..AdversaryConfig::default()
+        }
+    }
+
+    #[test]
+    fn temporal_amount_window_and_tol_boundaries() {
+        // Peel chain: s1 -> x at ts=100, then x -> s2 at ts=100+dt links s1 and s2.
+        let (s1, x, s2) = (acc(1), acc(9), acc(2));
+        let peel = |dt: i64, bamt: u64| {
+            led(vec![
+                rec(1, 1, 100, s1, x, 1_000_000, Transfer),
+                rec(2, 2, 100 + dt, x, s2, bamt, Transfer),
+            ])
+        };
+        assert!(same(&cluster(&peel(0, 1_000_000), &only_temporal()), s1, s2), "dt=0 unions");
+        assert!(same(&cluster(&peel(120, 1_000_000), &only_temporal()), s1, s2), "dt=window unions");
+        assert!(!same(&cluster(&peel(121, 1_000_000), &only_temporal()), s1, s2), "dt>window no union");
+        // tol = 1_000_000 * 50 bps / 10_000 = 5_000.
+        assert!(same(&cluster(&peel(10, 1_005_000), &only_temporal()), s1, s2), "diff==tol unions");
+        assert!(!same(&cluster(&peel(10, 1_005_001), &only_temporal()), s1, s2), "diff>tol no union");
     }
 }
