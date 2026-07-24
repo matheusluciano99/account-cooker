@@ -1,8 +1,8 @@
-//! `hunter` — "O Cacador" (the Hunter).
+//! `hunter` — "the adversary" (the adversary).
 //!
 //! An adversarial chain-analysis harness. It runs the same clustering heuristics a
 //! real de-anonymization firm would, then MEASURES how well it recovered the truth.
-//! Run it against a baseline (naive) ledger and against a Curupira ledger to get the
+//! Run it against a baseline (naive) ledger and against a account-cooker ledger to get the
 //! before/after numbers that turn "privacy through noise" into a defensible claim.
 
 pub mod heuristics;

@@ -13,6 +13,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "account-cooker-cli"
+version = "0.1.0"
+dependencies = [
+ "agent-runtime",
+ "anyhow",
+ "clap",
+ "hunter",
+ "noise-core",
+ "persona",
+ "serde_json",
+]
+
+[[package]]
 name = "adapters"
 version = "0.1.0"
 dependencies = [
@@ -1007,19 +1020,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
-]
-
-[[package]]
-name = "curupira-cli"
-version = "0.1.0"
-dependencies = [
- "agent-runtime",
- "anyhow",
- "clap",
- "hunter",
- "noise-core",
- "persona",
- "serde_json",
 ]
 
 [[package]]

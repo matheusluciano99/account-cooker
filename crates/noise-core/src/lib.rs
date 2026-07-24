@@ -1,4 +1,4 @@
-//! `noise-core` — pure privacy-through-noise primitives for the Curupira account cooker.
+//! `noise-core` — pure privacy-through-noise primitives for the account-cooker workspace.
 //!
 //! Everything here is deterministic given an RNG and free of any network / Solana
 //! dependency, so it can be unit-tested without a validator. The live chain layer

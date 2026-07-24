@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-rpc_url="${CURUPIRA_RPC_URL:-http://127.0.0.1:8899}"
+rpc_url="${COOKER_RPC_URL:-http://127.0.0.1:8899}"
 if [[ ! "$rpc_url" =~ ^http://(127\.0\.0\.1|localhost|\[::1\]):[0-9]+/?$ ]]; then
-  echo "CURUPIRA_RPC_URL must be a plain loopback HTTP endpoint" >&2
+  echo "COOKER_RPC_URL must be a plain loopback HTTP endpoint" >&2
   exit 1
 fi
-proof_dir="$(mktemp -d "${TMPDIR:-/tmp}/curupira-live-proof.XXXXXX")"
+proof_dir="$(mktemp -d "${TMPDIR:-/tmp}/account-cooker-live-proof.XXXXXX")"
 trap 'rm -rf -- "$proof_dir"' EXIT
 
 for required_command in solana solana-keygen cargo jq; do
@@ -36,7 +36,7 @@ done
 
 # The fee-payer top-up must cover the rent-exempt minimum (~0.0009 SOL) plus the action fee,
 # so the ceilings are set above that rather than at a bare fee.
-cargo run --quiet --features live --bin curupira -- live-transfer \
+cargo run --quiet --features live --bin account-cooker -- live-transfer \
   --rpc-url "$rpc_url" \
   --payer "$payer" \
   --destination "$destination" \

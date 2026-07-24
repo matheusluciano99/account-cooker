@@ -71,7 +71,7 @@ impl MockChain {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     Naive,
-    Curupira,
+    Cooker,
 }
 
 #[derive(Clone, Debug)]
@@ -82,17 +82,17 @@ pub struct SimConfig {
     pub mode: Mode,
     pub seed: u64,
     pub num_external: usize,
-    /// Curupira-only: enable timing hardening (per-subaccount decorrelated scheduling,
-    /// single-source actions, per-record ts jitter). `false` = legacy Curupira (single
+    /// account-cooker-only: enable timing hardening (per-subaccount decorrelated scheduling,
+    /// single-source actions, per-record ts jitter). `false` = legacy account-cooker (single
     /// agent clock, whole action stamped at one ts). No effect on `Mode::Naive`.
     pub harden_timing: bool,
     pub hardening: HardeningConfig,
-    /// Curupira-only: model where fee-payer SOL comes from as a post-pass over the finished
+    /// account-cooker-only: model where fee-payer SOL comes from as a post-pass over the finished
     /// ledger. `None` (default) is byte-identical to the pre-funding engine.
     pub funding: Option<FundingConfig>,
 }
 
-/// Tunables for the hardened Curupira path.
+/// Tunables for the hardened account-cooker path.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HardeningConfig {
     /// Mean seconds between consecutive records within one wake (exponential, min 1s).
@@ -139,7 +139,7 @@ impl Default for SimConfig {
             num_agents: 12,
             duration_secs: 3 * 86_400, // three simulated days
             start_ts: 1_700_000_000,
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             seed: 1,
             num_external: 40,
             harden_timing: true,
@@ -214,7 +214,7 @@ pub(crate) struct RunState {
 pub(crate) fn build_fresh(personas: &[Persona], cfg: &SimConfig) -> RunState {
     assert!(!personas.is_empty(), "need at least one persona");
     let mut rng = ChaCha12Rng::seed_from_u64(derive_seed(cfg));
-    let hardened = cfg.mode == Mode::Curupira && cfg.harden_timing;
+    let hardened = cfg.mode == Mode::Cooker && cfg.harden_timing;
 
     let externals: Vec<AccountId> = (0..cfg.num_external.max(1))
         .map(|_| AccountId::random(&mut rng))
@@ -356,8 +356,8 @@ pub(crate) fn run_core(st: &mut RunState, sink: &mut dyn DurSink) -> std::io::Re
 
 /// Run the simulation and return the observable ledger.
 ///
-/// `Mode::Naive` and legacy Curupira (`harden_timing == false`) use the single-clock
-/// `perform_action` path; hardened Curupira uses the per-subaccount `perform_action_hardened`.
+/// `Mode::Naive` and legacy account-cooker (`harden_timing == false`) use the single-clock
+/// `perform_action` path; hardened account-cooker uses the per-subaccount `perform_action_hardened`.
 pub fn simulate(personas: &[Persona], cfg: &SimConfig) -> Ledger {
     let mut st = build_fresh(personas, cfg);
     run_core(&mut st, &mut NullSink).expect("NullSink never fails");
@@ -403,8 +403,8 @@ fn perform_action(
         emit_with_noise(chain, agent, &planned, mode, rng);
     }
 
-    // Curupira interleaves decoys drawn from the persona's own dust model.
-    if mode == Mode::Curupira {
+    // account-cooker interleaves decoys drawn from the persona's own dust model.
+    if mode == Mode::Cooker {
         let n = agent.persona.decoy.num_decoys(rng);
         for _ in 0..n {
             let s = agent.subaccounts[rng.random_range(0..agent.subaccounts.len())];
@@ -593,7 +593,7 @@ fn consolidate_sweep(
     }
 }
 
-/// The heart of the difference between naive and Curupira behavior.
+/// The heart of the difference between naive and account-cooker behavior.
 fn emit_with_noise(
     chain: &mut MockChain,
     agent: &Agent,
@@ -607,9 +607,9 @@ fn emit_with_noise(
         Mode::Naive => {
             chain.record(p, agent.main, Some(agent.id));
         }
-        // Curupira: split the value into non-obvious parts and pay each with a fresh
+        // account-cooker: split the value into non-obvious parts and pay each with a fresh
         // throwaway fee-payer, from a rotating source. No stable fee-payer to cluster on.
-        Mode::Curupira => {
+        Mode::Cooker => {
             let parts = noise_core::split::split_amount(p.amount, &agent.persona.split, rng);
             let parts = if parts.is_empty() {
                 vec![p.amount]
@@ -652,9 +652,9 @@ fn maybe_rebalance(chain: &mut MockChain, agent: &Agent, mode: Mode, rng: &mut C
                 }
             }
         }
-        // Curupira: occasionally move value to a FRESH churn address (no stable hub),
+        // account-cooker: occasionally move value to a FRESH churn address (no stable hub),
         // paid by a throwaway fee-payer. Nothing for co-spend to latch onto.
-        Mode::Curupira => {
+        Mode::Cooker => {
             if rng.random::<f64>() < 0.08 {
                 let s = agent.subaccounts[rng.random_range(0..agent.subaccounts.len())];
                 let churn = AccountId::random(rng);
@@ -680,14 +680,14 @@ pub fn run_comparison(personas: &[Persona], base: &SimConfig) -> (Ledger, Ledger
             ..base.clone()
         },
     );
-    let curupira = simulate(
+    let cooker = simulate(
         personas,
         &SimConfig {
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             ..base.clone()
         },
     );
-    (naive, curupira)
+    (naive, cooker)
 }
 
 #[cfg(test)]
@@ -706,7 +706,7 @@ mod tests {
     }
 
     /// The learned (ML) adversary re-identifies the naive fleet near-perfectly (ROC AUC ~1.0)
-    /// and is driven well down on hardened Curupira — the honest closed loop against a trained
+    /// and is driven well down on hardened account-cooker — the honest closed loop against a trained
     /// classifier, not just hand-written heuristics.
     #[test]
     fn ml_adversary_degraded_by_hardening() {
@@ -754,7 +754,7 @@ mod tests {
         let hardened = simulate(
             &personas,
             &SimConfig {
-                mode: Mode::Curupira,
+                mode: Mode::Cooker,
                 harden_timing: true,
                 ..base.clone()
             },
@@ -762,7 +762,7 @@ mod tests {
         let legacy = simulate(
             &personas,
             &SimConfig {
-                mode: Mode::Curupira,
+                mode: Mode::Cooker,
                 harden_timing: false,
                 ..base.clone()
             },
@@ -772,7 +772,7 @@ mod tests {
 
     /// The honest arms race is worst-case over adversaries: naive AND legacy are each fully
     /// de-anonymized by *some* adversary (naive by fee-payer linkage everywhere; legacy by
-    /// same-timestamp co-activity under the exact-ts adversary). Only hardened Curupira resists
+    /// same-timestamp co-activity under the exact-ts adversary). Only hardened account-cooker resists
     /// both, leaving a low, high-precision residual. Dest-agnostic co-activity is disabled in
     /// the windowed adversary because it over-merges at fleet scale, so legacy — whose only tell
     /// is that co-activity — reads low under `windowed`; its worst case is the exact-ts number.
@@ -812,7 +812,7 @@ mod tests {
             l_exact.attribution_precision
         );
 
-        // Exact-ts collapses on hardened Curupira (no same-ts fan-out to key on).
+        // Exact-ts collapses on hardened account-cooker (no same-ts fan-out to key on).
         assert!(
             h_exact.attribution_f1 < 0.3,
             "hardened exact f1 {}",
@@ -892,7 +892,7 @@ mod tests {
     #[test]
     fn hardened_simulation_is_deterministic() {
         let personas = Persona::presets();
-        let cfg = SimConfig::default(); // hardened Curupira by default
+        let cfg = SimConfig::default(); // hardened account-cooker by default
         let a = simulate(&personas, &cfg);
         let b = simulate(&personas, &cfg);
         assert_eq!(a.records.len(), b.records.len());
@@ -910,8 +910,8 @@ mod tests {
         let personas = Persona::presets();
         for (mode, harden_timing) in [
             (Mode::Naive, false),
-            (Mode::Curupira, false),
-            (Mode::Curupira, true),
+            (Mode::Cooker, false),
+            (Mode::Cooker, true),
         ] {
             let ledger = simulate(
                 &personas,
@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_curupira_reproducible_and_distinct_from_hardened() {
+    fn legacy_cooker_reproducible_and_distinct_from_hardened() {
         let personas = Persona::presets();
         let base = SimConfig::default();
         let legacy1 = simulate(
@@ -1027,7 +1027,7 @@ mod tests {
     // Heavy; excluded from the default suite. Run with:
     //   cargo test -p agent-runtime --release -- --ignored scale
     //
-    // 1000 agents x 30 days, hardened Curupira. Proves three things at scale: it produces
+    // 1000 agents x 30 days, hardened account-cooker. Proves three things at scale: it produces
     // millions of records fast; three independent runs of the same config yield a byte-identical
     // trace-hash (determinism); and the arms-race invariants hold. To fit memory, only one large
     // ledger is alive at a time — each is hashed (and the first one scored) then dropped.
@@ -1060,7 +1060,7 @@ mod tests {
 
         // Three hardened runs: hash each, score the first, drop before the next.
         let hardened_cfg = SimConfig {
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             harden_timing: true,
             ..base.clone()
         };

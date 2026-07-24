@@ -1,4 +1,4 @@
-//! O Caçador v5 — a learned (machine-learning) adversary.
+//! the adversary v5 — a learned (machine-learning) adversary.
 //!
 //! The heuristic adversary in `heuristics.rs` unions accounts with hand-written rules. This
 //! module instead *learns* to link accounts: a logistic-regression classifier over observable

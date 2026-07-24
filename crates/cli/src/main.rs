@@ -1,9 +1,9 @@
-//! `curupira` CLI.
+//! `account-cooker` CLI.
 //!
-//! `demo`   run naive vs Curupira fleets and print the before/after attribution numbers
+//! `demo`   run naive vs account-cooker fleets and print the before/after attribution numbers
 //! `benchmark` repeat the comparison across consecutive seeds
 //! `dump`   write a simulated ledger to JSON
-//! `report` score a ledger JSON with O Cacador
+//! `report` score a ledger JSON with the adversary
 //! `run`    run a fleet durably (crash-safe checkpoint/resume)
 //! `cost`   estimate signature fees and transferred volume for a ledger
 //! `live-transfer` quote/execute a bounded real transfer (under `--features live`)
@@ -43,16 +43,16 @@ fn parse_rebalance(kind: &str) -> Result<RebalanceStrategy> {
 fn parse_mode(kind: &str) -> Result<Mode> {
     match kind.to_lowercase().as_str() {
         "naive" => Ok(Mode::Naive),
-        "curupira" => Ok(Mode::Curupira),
-        other => anyhow::bail!("unknown --mode '{other}' (naive|curupira)"),
+        "cooker" => Ok(Mode::Cooker),
+        other => anyhow::bail!("unknown --mode '{other}' (naive|cooker)"),
     }
 }
 
 #[derive(Parser)]
 #[command(
-    name = "curupira",
+    name = "account-cooker",
     version,
-    about = "Believable Solana activity at scale + adversarial privacy measurement (O Cacador)"
+    about = "Believable Solana activity at scale + adversarial privacy measurement (the adversary)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -71,7 +71,7 @@ struct PersonaFiles {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Run naive vs Curupira fleets with the same seed and print the before/after report.
+    /// Run naive vs account-cooker fleets with the same seed and print the before/after report.
     Demo {
         #[arg(long, default_value_t = 12)]
         agents: usize,
@@ -103,7 +103,7 @@ enum Cmd {
     },
     /// Simulate one fleet and write the observable ledger to a JSON file.
     Dump {
-        #[arg(long, default_value = "curupira")]
+        #[arg(long, default_value = "cooker")]
         mode: String,
         #[arg(long, default_value_t = 12)]
         agents: usize,
@@ -131,7 +131,7 @@ enum Cmd {
     /// crash (SIGKILL) can be resumed with `--resume`. The final ledger is byte-identical to
     /// an uninterrupted run.
     Run {
-        #[arg(long, default_value = "curupira")]
+        #[arg(long, default_value = "cooker")]
         mode: String,
         #[arg(long, default_value_t = 12)]
         agents: usize,
@@ -501,7 +501,7 @@ fn demo(
 ) -> Result<()> {
     let personas = load_personas(persona_files)?;
     let base = base_cfg(agents, days, seed, external)?;
-    // Three ledgers: naive baseline, hardened Curupira (default), and legacy (un-hardened).
+    // Three ledgers: naive baseline, hardened account-cooker (default), and legacy (un-hardened).
     let naive = simulate(
         &personas,
         &SimConfig {
@@ -512,7 +512,7 @@ fn demo(
     let hardened = simulate(
         &personas,
         &SimConfig {
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             harden_timing: true,
             ..base.clone()
         },
@@ -520,7 +520,7 @@ fn demo(
     let legacy = simulate(
         &personas,
         &SimConfig {
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             harden_timing: false,
             ..base.clone()
         },
@@ -536,12 +536,12 @@ fn demo(
     let (_, l_w) = analyze(&legacy, &win);
 
     println!();
-    println!("  Curupira — believable activity vs adversarial attribution (O Cacador)");
+    println!("  account-cooker — believable activity vs adversarial attribution (the adversary)");
     println!("  seed={seed}  agents={agents}  days={days}");
     println!();
     println!(
         "  {:<24}{:>10}{:>10}{:>10}",
-        "", "NAIVE", "CURUPIRA", "LEGACY"
+        "", "NAIVE", "COOKER", "LEGACY"
     );
     row3(
         "transactions",
@@ -613,7 +613,7 @@ fn demo(
     Ok(())
 }
 
-/// O Caçador v5: a learned logistic adversary scored with operator-disjoint cross-validation.
+/// the adversary v5: a learned logistic adversary scored with operator-disjoint cross-validation.
 /// Reports held-out ROC AUC (the metric a modern chain-analysis firm reports) alongside the same
 /// pairwise F1/precision the heuristic rows use.
 fn ml_section(naive: &Ledger, hardened: &Ledger, legacy: &Ledger) {
@@ -622,7 +622,7 @@ fn ml_section(naive: &Ledger, hardened: &Ledger, legacy: &Ledger) {
     println!("  -- adversary: learned logistic model (leave-operators-out CV, held-out) --");
     println!(
         "  {:<24}{:>10}{:>10}{:>10}",
-        "", "NAIVE", "CURUPIRA", "LEGACY"
+        "", "NAIVE", "COOKER", "LEGACY"
     );
     let reports: Vec<_> = [naive, hardened, legacy]
         .iter()
@@ -656,7 +656,7 @@ fn ml_section(naive: &Ledger, hardened: &Ledger, legacy: &Ledger) {
         reports[2].report.attribution_precision,
         Fmt::F2,
     );
-    // Honesty check: did fusing features beat the best single rule on hardened Curupira?
+    // Honesty check: did fusing features beat the best single rule on hardened account-cooker?
     let h = &reports[1];
     let best_single = h
         .single_feature_aucs
@@ -673,7 +673,9 @@ fn ml_section(naive: &Ledger, hardened: &Ledger, legacy: &Ledger) {
         "  Reading: a trained logistic model re-identifies naive at AUC {:.2} (it relearns the",
         reports[0].roc_auc
     );
-    println!("  fee-payer rule), but is driven down on hardened Curupira. On hardened the fused");
+    println!(
+        "  fee-payer rule), but is driven down on hardened account-cooker. On hardened the fused"
+    );
     if h.roc_auc_defined {
         println!(
             "  model reaches AUC {:.2} vs the best single feature ({}) at AUC {:.2} — learned",
@@ -702,7 +704,7 @@ fn rebalance_section(personas: &[Persona], base: &SimConfig) {
         ("direct operator hub", RebalanceStrategy::DirectHub),
     ] {
         let mut cfg = SimConfig {
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             harden_timing: true,
             ..base.clone()
         };
@@ -740,7 +742,7 @@ fn benchmark(
     );
     println!(
         "{:<12}{:>10}{:>12}{:>10}",
-        "seed", "naive F1", "curupira F1", "legacy F1"
+        "seed", "naive F1", "account-cooker F1", "legacy F1"
     );
     println!("  (worst-case attribution F1 over the exact-ts and windowed adversaries)");
     for offset in 0..seeds {
@@ -766,8 +768,8 @@ fn benchmark(
             windowed.max(exact)
         };
         let naive = score(Mode::Naive, false);
-        let hardened = score(Mode::Curupira, true);
-        let legacy = score(Mode::Curupira, false);
+        let hardened = score(Mode::Cooker, true);
+        let legacy = score(Mode::Cooker, false);
         naive_scores.push(naive);
         hardened_scores.push(hardened);
         legacy_scores.push(legacy);
@@ -782,7 +784,7 @@ fn benchmark(
     };
     println!();
     summary("naive", &naive_scores);
-    summary("curupira", &hardened_scores);
+    summary("account-cooker", &hardened_scores);
     summary("legacy", &legacy_scores);
     Ok(())
 }
@@ -795,7 +797,7 @@ fn funding_section(personas: &[Persona], base: &SimConfig, agents: usize) {
     let adv = AdversaryConfig::funder_aware(120);
     let hardened_funded = |policy: FundingPolicy| -> Report {
         let cfg = SimConfig {
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             harden_timing: true,
             funding: Some(FundingConfig::new(policy)),
             ..base.clone()
@@ -813,7 +815,7 @@ fn funding_section(personas: &[Persona], base: &SimConfig, agents: usize) {
     // Baseline: hardened, funding not modeled, scored by the same funder-aware adversary.
     let off = {
         let cfg = SimConfig {
-            mode: Mode::Curupira,
+            mode: Mode::Cooker,
             harden_timing: true,
             funding: None,
             ..base.clone()
@@ -843,7 +845,7 @@ fn funding_section(personas: &[Persona], base: &SimConfig, agents: usize) {
 
     // Relayer-pool sweep: shrink K and watch attribution trade against the anonymity set.
     println!();
-    println!("  shared relayer pool sweep (hardened Curupira, funder-aware adversary):");
+    println!("  shared relayer pool sweep (hardened account-cooker, funder-aware adversary):");
     println!(
         "  {:<18}{:>8}{:>8}{:>8}{:>8}",
         "pool size K", "F1", "prec", "recall", "anon"
@@ -870,7 +872,7 @@ fn funding_section(personas: &[Persona], base: &SimConfig, agents: usize) {
 /// precision / recall / window-purity at each width.
 fn ablation(hardened: &Ledger) {
     println!();
-    println!("  O Cacador window sweep on hardened Curupira (the honest arms race):");
+    println!("  the adversary window sweep on hardened account-cooker (the honest arms race):");
     println!(
         "  {:<18}{:>8}{:>8}{:>8}{:>8}",
         "windowed adversary", "F1", "prec", "recall", "wpur"

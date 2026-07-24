@@ -1,4 +1,4 @@
-# Curupira 🦶🔄
+# account-cooker 🦶🔄
 
 **Believable Solana activity at scale, paired with an adversarial harness that measures
 how linkable the resulting accounts remain.**
@@ -7,13 +7,13 @@ how linkable the resulting accounts remain.**
 > [`account-cooker`](https://superteam.fun/earn/listing/noise) bounty. Rust, end-to-end,
 > MIT licensed.
 
-_Curupira_ is the Brazilian folklore creature whose feet point backwards and confuse
+_account-cooker_ is the Brazilian folklore creature whose feet point backwards and confuse
 trackers. The name fits the goal, but the project does not rely on folklore-grade claims:
-every privacy result is scored by **O Caçador**, the adversary shipped in this repository.
+every privacy result is scored by **the adversary**, the adversary shipped in this repository.
 
 ## Why this submission is different
 
-Curupira is a complete experiment and an operational foundation, not a random transaction
+account-cooker is a complete experiment and an operational foundation, not a random transaction
 loop:
 
 - **Believable behavior:** declarative retail, whale, and market-maker personas; circadian
@@ -22,7 +22,7 @@ loop:
 - **Fleet operation:** deterministic seeded runs, a heap scheduler, custom persona loading,
   cost estimation, append-only journals, atomic checkpoints, exact crash recovery, and
   million-record scale tests.
-- **Privacy measurement:** O Caçador attacks fee-payer reuse, graph consolidation,
+- **Privacy measurement:** the adversary attacks fee-payer reuse, graph consolidation,
   activation lineage, peel chains, co-payment/co-activity timing, and fee-payer funding — plus
   a trained logistic-regression classifier (held-out ROC AUC) for the modern-clustering bar.
   It reads only observable transaction fields; ownership labels are confined to scoring/training.
@@ -38,12 +38,12 @@ but it is neither encryption nor a mixer. The harness exists to expose where it 
 Run:
 
 ```bash
-cargo run --release --bin curupira -- demo --agents 12 --days 3 --seed 1
+cargo run --release --bin account-cooker -- demo --agents 12 --days 3 --seed 1
 ```
 
 The current engine produces:
 
-| adversary result | naive | Curupira | legacy engine |
+| adversary result | naive | account-cooker | legacy engine |
 |---|---:|---:|---:|
 | transactions | 1,895 | 6,286 | 7,095 |
 | distinct accounts | 112 | 6,455 | 7,306 |
@@ -56,17 +56,17 @@ That is a **75% reduction in attribution F1** versus the naive fleet while retai
 precision 1.00. It is not a lucky seed:
 
 ```bash
-cargo run --release --bin curupira -- benchmark \
+cargo run --release --bin account-cooker -- benchmark \
   --agents 12 --days 3 --seed-start 1 --seeds 10
 ```
 
 | mode | mean F1 | minimum | maximum |
 |---|---:|---:|---:|
 | naive | 1.000 | 1.000 | 1.000 |
-| Curupira | **0.263** | 0.246 | 0.277 |
+| account-cooker | **0.263** | 0.246 | 0.277 |
 | legacy engine | 0.983 | 0.923 | 1.000 |
 
-The hardened result remains non-zero because O Caçador follows observable
+The hardened result remains non-zero because the adversary follows observable
 predecessor-to-successor activation. This is the honest residual of rotating accounts:
 
 | balance strategy | F1 | precision | recall |
@@ -97,7 +97,7 @@ The conclusion matters more than the favorable number: **fee-payer rotation is c
 when one operator-owned wallet funds every fee-payer.** A dedicated intermediate wallet
 does not help. Shared relayers create an anonymity set, but they also cause a simple
 common-funder heuristic to merge different operators; its lower precision is uncertainty,
-not proof of privacy. Curupira prints precision specifically so a giant-cluster adversary
+not proof of privacy. account-cooker prints precision specifically so a giant-cluster adversary
 cannot manufacture a convincing F1.
 
 ## Quickstart
@@ -107,17 +107,17 @@ Requirements: stable Rust and Cargo.
 ```bash
 # Offline, deterministic, no validator or credentials
 cargo test --workspace
-cargo run --bin curupira -- demo
-cargo run --bin curupira -- benchmark --seeds 10
+cargo run --bin account-cooker -- demo
+cargo run --bin account-cooker -- benchmark --seeds 10
 
 # Write and score a ledger
-cargo run --bin curupira -- dump \
-  --mode curupira --funding hub --out ledger.json
-cargo run --bin curupira -- report \
+cargo run --bin account-cooker -- dump \
+  --mode cooker --funding hub --out ledger.json
+cargo run --bin account-cooker -- report \
   --ledger ledger.json --funder-aware
 
 # Make the operational cost assumption explicit
-cargo run --bin curupira -- cost \
+cargo run --bin account-cooker -- cost \
   --ledger ledger.json --lamports-per-signature 5000
 ```
 
@@ -126,9 +126,9 @@ cargo run --bin curupira -- cost \
 Export the presets, edit the TOML, and load one file or a whole directory:
 
 ```bash
-cargo run --bin curupira -- personas --out-dir personas
-cargo run --bin curupira -- demo --personas-dir personas
-cargo run --bin curupira -- dump \
+cargo run --bin account-cooker -- personas --out-dir personas
+cargo run --bin account-cooker -- demo --personas-dir personas
+cargo run --bin account-cooker -- dump \
   --persona personas/retail.toml \
   --persona personas/whale.toml \
   --out ledger.json
@@ -140,12 +140,12 @@ profiles, and duplicate persona names fail before a run starts.
 ### Durable runs
 
 ```bash
-cargo run --bin curupira -- run \
-  --dir /tmp/curupira-run --out ledger.json
+cargo run --bin account-cooker -- run \
+  --dir /tmp/account-cooker-run --out ledger.json
 
 # After SIGKILL or another interruption:
-cargo run --bin curupira -- run \
-  --dir /tmp/curupira-run --out ledger.json --resume
+cargo run --bin account-cooker -- run \
+  --dir /tmp/account-cooker-run --out ledger.json --resume
 ```
 
 `ledger.jsonl` is append-only. `checkpoint.json` is written by temp-file + sync + atomic
@@ -160,7 +160,7 @@ Live dependencies are opt-in:
 
 ```bash
 cargo build --workspace --features live
-cargo run --features live --bin curupira -- live-transfer --help   # also: live-memo, live-stake
+cargo run --features live --bin account-cooker -- live-transfer --help   # also: live-memo, live-stake
 ```
 
 Every live command shares one fail-closed envelope: quote-only unless `--execute`, remote RPC
@@ -202,12 +202,12 @@ intent-only (no chain deps, for offline testability); the real instruction seam 
 | `adapters` | protocol-agnostic planners for transfer/stake/swap/memo intents |
 | `agent-runtime` | agent scheduler, hardening, account rotation, funding models, durability, optional RPC execution |
 | `hunter` | observable-only clustering heuristics and ground-truth-only metrics |
-| `curupira-cli` | demo, benchmark, dump, durable run, report, cost, personas, live proof |
+| `account-cooker-cli` | demo, benchmark, dump, durable run, report, cost, personas, live proof |
 
 The simulator and adversary are isolated from the RPC layer. That makes every behavioral
 and attribution result deterministic, cheap to test, and reproducible without a network.
 
-## What O Caçador measures
+## What the adversary measures
 
 Every record contains an `operator` label solely for evaluation. Production heuristics
 never inspect it.
@@ -232,7 +232,7 @@ who merely transact during the same interval.
 
 ## The learned adversary (a trained classifier, not just heuristics)
 
-To measure against *modern* clustering — not only hand-written rules — O Caçador also ships a
+To measure against *modern* clustering — not only hand-written rules — the adversary also ships a
 learned adversary: a hand-rolled logistic-regression classifier over observable pairwise
 features (fee-payer/destination overlap, co-burst, windowed co-payment, common-funder,
 activation-lineage, peel-chain, timespan). It predicts P(two accounts share an operator) and is
@@ -240,13 +240,13 @@ scored by threshold-free **ROC AUC** — the metric a modern chain-analysis firm
 
 ```
   -- adversary: learned logistic model (leave-operators-out CV, held-out) --
-                               NAIVE  CURUPIRA    LEGACY
+                               NAIVE    COOKER    LEGACY
   ROC AUC (down)                1.00      0.63      1.00
   attribution F1 (down)         1.00      0.21      1.00
 ```
 
 It re-identifies naive and legacy fleets at **AUC 1.00**, and is driven to **AUC 0.63** on
-hardened Curupira — barely above the 0.5 coin-flip. The fused model (0.63) edges out its best
+hardened account-cooker — barely above the 0.5 coin-flip. The fused model (0.63) edges out its best
 single feature (0.59), so the small residual is genuine learned fusion, not one rule in
 disguise. Honesty guarantees, all test-guarded:
 
@@ -258,7 +258,7 @@ disguise. Honesty guarantees, all test-guarded:
 - **Genuinely bounded:** the report prints each single-feature AUC next to the fused AUC, so
   "the model beat any one rule" is measured, not claimed.
 
-The headline: even a trained classifier only reaches AUC ≈ 0.63 on hardened Curupira, and unlike
+The headline: even a trained classifier only reaches AUC ≈ 0.63 on hardened account-cooker, and unlike
 comparable ML adversaries we then **close the loop** (re-measure after hardening) and **model the
 funding graph**. Any external AUC figure is indicative, not a like-for-like comparison.
 
@@ -274,7 +274,7 @@ scale: 4768768 records, naive f1 1.00, hardened f1 0.12 (prec 1.00),
        trace-hash 04b26a83…8efe2d46
 ```
 
-Naive is fully de-anonymized (F1 1.00) at any scale; hardened Curupira holds at F1 0.12 at
+Naive is fully de-anonymized (F1 1.00) at any scale; hardened account-cooker holds at F1 0.12 at
 precision 1.00 — the same residual as the 12-agent demo, with no giant-cluster collapse.
 
 Reaching a trustworthy number at scale meant fixing our own adversary: dest-agnostic
@@ -298,7 +298,7 @@ features, shell syntax, and release stress tests.
 
 ## Threat model
 
-Curupira raises the cost of deterministic behavioral clustering. It does not make
+account-cooker raises the cost of deterministic behavioral clustering. It does not make
 transactions confidential.
 
 - It does not pool, custody, or obscure user funds and is **not a mixer**.
@@ -307,7 +307,7 @@ transactions confidential.
 - RPC IP, infrastructure fingerprints, validator observations, and off-chain identity are
   out of scope.
 - Deterministic heuristics are not a substitute for a trained behavioral classifier.
-- Cover traffic costs fees and capital movement. `curupira cost` reports explicit
+- Cover traffic costs fees and capital movement. `account-cooker cost` reports explicit
   assumptions; no default fee is presented as universal.
 - Real protocol integrations need protocol-specific safety checks, slippage limits, account
   validation, and validator evidence. SOL transfer, SPL memo, and native stake delegation make

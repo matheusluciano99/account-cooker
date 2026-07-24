@@ -1,10 +1,10 @@
 //! Fee-payer funding as an observable graph.
 //!
-//! Curupira mints a fresh throwaway fee-payer per transaction part. On a real chain each of
+//! account-cooker mints a fresh throwaway fee-payer per transaction part. On a real chain each of
 //! those throwaways must first be funded with SOL — and that funding transaction is itself
 //! observable. If every throwaway traces back to one operator-owned wallet, an analyst walks
 //! the common-funder graph and re-links the whole fleet, undoing fee-payer rotation. This
-//! module models that funding so O Caçador can measure the leak instead of ignoring it.
+//! module models that funding so the adversary can measure the leak instead of ignoring it.
 //!
 //! It runs as a PURE POST-PASS over a completed base ledger, on its own seeded RNG stream that
 //! never touches the action stream: with `funding: None` the ledger is returned unchanged, and

@@ -6,21 +6,21 @@
 //! (golden's `sig`s are the contiguous 1..=N).
 //!
 //! Heavy + spawns processes + uses `timeout`. Excluded from the default suite. Run with:
-//!   cargo test -p curupira-cli --release -- --ignored crash_recovery
+//!   cargo test -p account-cooker-cli --release -- --ignored crash_recovery
 
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_curupira")
+    env!("CARGO_BIN_EXE_account-cooker")
 }
 
 fn common() -> Vec<&'static str> {
     vec![
         "run",
         "--mode",
-        "curupira",
+        "account-cooker",
         "--agents",
         "300",
         "--days",
@@ -37,7 +37,7 @@ fn common() -> Vec<&'static str> {
 #[test]
 #[ignore]
 fn sigkill_resume_is_byte_identical() {
-    let tmp = std::env::temp_dir().join(format!("curupira_crash_{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("account-cooker_crash_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let g_dir = tmp.join("G");

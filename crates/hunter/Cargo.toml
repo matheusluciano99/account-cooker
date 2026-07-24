@@ -3,7 +3,7 @@ name = "hunter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "O Cacador — adversarial chain-analysis harness that MEASURES how linkable a ledger is."
+description = "the adversary — adversarial chain-analysis harness that MEASURES how linkable a ledger is."
 
 [dependencies]
 noise-core.workspace = true

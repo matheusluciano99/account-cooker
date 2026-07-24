@@ -386,7 +386,7 @@ mod tests {
     fn tmpdir(tag: &str) -> PathBuf {
         let id = CTR.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "curupira_dur_{}_{}_{}",
+            "account-cooker_dur_{}_{}_{}",
             std::process::id(),
             tag,
             id
@@ -435,7 +435,7 @@ mod tests {
     #[test]
     fn durable_completion_equals_simulate() {
         let personas = Persona::presets();
-        for (mode, harden) in [(Mode::Naive, false), (Mode::Curupira, true)] {
+        for (mode, harden) in [(Mode::Naive, false), (Mode::Cooker, true)] {
             let cfg = small_cfg(mode, harden);
             let dir = tmpdir("complete");
             let opts = DurabilityOpts {
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn mid_run_resume_equals_golden() {
         let personas = Persona::presets();
-        for (mode, harden) in [(Mode::Naive, false), (Mode::Curupira, true)] {
+        for (mode, harden) in [(Mode::Naive, false), (Mode::Cooker, true)] {
             let cfg = small_cfg(mode, harden);
             let golden = simulate(&personas, &cfg);
             let total_events = golden.records.len().max(4);
@@ -522,7 +522,7 @@ mod tests {
         let personas = Persona::presets();
         let cfg = SimConfig {
             funding: Some(FundingConfig::new(FundingPolicy::SharedRelayers { k: 3 })),
-            ..small_cfg(Mode::Curupira, true)
+            ..small_cfg(Mode::Cooker, true)
         };
         let golden = simulate(&personas, &cfg);
         let total_events = golden.records.len().max(4);
@@ -556,7 +556,7 @@ mod tests {
         let personas = Persona::presets();
         let hub = SimConfig {
             funding: Some(FundingConfig::new(FundingPolicy::OperatorHub)),
-            ..small_cfg(Mode::Curupira, true)
+            ..small_cfg(Mode::Cooker, true)
         };
         let dir = tmpdir("fund-mismatch");
         let opts = DurabilityOpts {
@@ -573,7 +573,7 @@ mod tests {
         drop(crash);
         let relayers = SimConfig {
             funding: Some(FundingConfig::new(FundingPolicy::SharedRelayers { k: 2 })),
-            ..small_cfg(Mode::Curupira, true)
+            ..small_cfg(Mode::Cooker, true)
         };
         assert!(
             resume_durable(&personas, &relayers, &dir, opts).is_err(),
@@ -587,7 +587,7 @@ mod tests {
     fn funding_none_keeps_unfunded_digest() {
         use crate::{FundingConfig, FundingPolicy};
         let personas = Persona::presets();
-        let none = small_cfg(Mode::Curupira, true);
+        let none = small_cfg(Mode::Cooker, true);
         let some = SimConfig {
             funding: Some(FundingConfig::new(FundingPolicy::OperatorHub)),
             ..none.clone()
@@ -608,7 +608,7 @@ mod tests {
     #[test]
     fn resume_truncates_torn_tail_and_rejects_mismatch() {
         let personas = Persona::presets();
-        let cfg = small_cfg(Mode::Curupira, true);
+        let cfg = small_cfg(Mode::Cooker, true);
         let golden = simulate(&personas, &cfg);
         let dir = tmpdir("torn");
         let opts = DurabilityOpts {
