@@ -94,10 +94,6 @@ pub struct AdversaryConfig {
     pub copay_min_amount: u64,
     /// Ablation only: union every source in a group with no repetition threshold.
     pub use_burst_union_ceiling: bool,
-    /// Optional subtractive guard: drop a copay bucket that has any non-dust part below
-    /// `split_min_part_floor`. Can only remove edges, never add them.
-    pub use_split_shape_guard: bool,
-    pub split_min_part_floor: u64,
 
     /// Group records by a Δt time window instead of identical-ts bursts.
     pub use_windowed: bool,
@@ -134,8 +130,6 @@ impl Default for AdversaryConfig {
             burst_max_sources: 10,
             copay_min_amount: 0,
             use_burst_union_ceiling: false,
-            use_split_shape_guard: false,
-            split_min_part_floor: 1_000,
             use_windowed: false,
             window_secs: 120,
             use_funder_graph: false,
@@ -240,24 +234,15 @@ fn copay_edges(
 ) -> HashMap<(AccountId, AccountId), u32> {
     let mut weight: HashMap<(AccountId, AccountId), u32> = HashMap::new();
     for group in groups {
-        let mut by_dest: HashMap<AccountId, (BTreeSet<AccountId>, bool)> = HashMap::new();
+        let mut by_dest: HashMap<AccountId, BTreeSet<AccountId>> = HashMap::new();
         for &ix in group {
             let r = &records[ix];
             if r.amount < cfg.copay_min_amount {
                 continue;
             }
-            let e = by_dest
-                .entry(r.dest)
-                .or_insert_with(|| (BTreeSet::new(), false));
-            e.0.insert(r.source);
-            if r.amount < cfg.split_min_part_floor {
-                e.1 = true;
-            }
+            by_dest.entry(r.dest).or_default().insert(r.source);
         }
-        for (srcs, has_subfloor) in by_dest.values() {
-            if cfg.use_split_shape_guard && *has_subfloor {
-                continue;
-            }
+        for srcs in by_dest.values() {
             if srcs.len() < cfg.copay_min_sources || srcs.len() > cfg.burst_max_sources {
                 continue;
             }
@@ -309,16 +294,10 @@ fn windowed_copay_edges(
             }
 
             let mut srcs: BTreeSet<AccountId> = BTreeSet::new();
-            let mut has_subfloor = false;
             for &ix in &indices[start..end] {
-                let r = &records[ix];
-                srcs.insert(r.source);
-                has_subfloor |= r.amount < cfg.split_min_part_floor;
+                srcs.insert(records[ix].source);
             }
-            if !(cfg.use_split_shape_guard && has_subfloor)
-                && srcs.len() >= cfg.copay_min_sources
-                && srcs.len() <= cfg.burst_max_sources
-            {
+            if srcs.len() >= cfg.copay_min_sources && srcs.len() <= cfg.burst_max_sources {
                 let sources: Vec<AccountId> = srcs.into_iter().collect();
                 for x in 0..sources.len() {
                     for y in (x + 1)..sources.len() {

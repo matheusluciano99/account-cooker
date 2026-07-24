@@ -308,11 +308,3 @@ Two more defects surfaced and fixed while proving stake:
 **Not attempted, honestly:** a real swap (Jupiter has no devnet liquidity, so a devnet swap
 is impossible — the swap adapter stays an offline intent planner) and SPL token flows (the
 `spl-token` crate pins an incompatible `solana-pubkey` major against solana-sdk 4).
-
-## Regression caught during verification
-
-An initial chronology fix anchored each agent's next wake to the global observable clock.
-The scale test rejected it because a 1,000-agent run collapsed to a fraction of its records.
-The runtime now keeps a per-agent logical schedule while monotonically clamping only emitted
-chain timestamps. A fast `aggregate_activity_scales_with_the_fleet` regression test was added,
-and the heavy proof again produced millions of records (see Scale above).

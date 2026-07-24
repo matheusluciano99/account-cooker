@@ -26,14 +26,8 @@ pub use funding::{FundingConfig, FundingPolicy};
 #[cfg(feature = "live")]
 pub mod live;
 
-/// A sink for transactions. `MockChain` records them; the live backend submits them.
-pub trait Chain {
-    fn now(&self) -> i64;
-    fn set_time(&mut self, ts: i64);
-    fn record(&mut self, tx: &PlannedTx, fee_payer: AccountId, operator: Option<AgentId>);
-}
-
-/// In-memory ledger. Records exactly the fields an on-chain observer would see.
+/// In-memory ledger sink. Records exactly the fields an on-chain observer would see. The live
+/// backend (`RpcChain`, under `--features live`) is a separate submit-to-RPC path.
 pub struct MockChain {
     pub ledger: Ledger,
     pub(crate) clock: i64,
@@ -50,9 +44,6 @@ impl MockChain {
             sig: 0,
         }
     }
-}
-
-impl Chain for MockChain {
     fn now(&self) -> i64 {
         self.clock
     }

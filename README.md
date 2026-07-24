@@ -196,7 +196,7 @@ intent-only (no chain deps, for offline testability); the real instruction seam 
 
 | crate | responsibility |
 |---|---|
-| `noise-core` | split policy, timing, decoys, account identifiers, curve25519 derivation primitives |
+| `noise-core` | split policy, circadian/Poisson timing, decoy policy, account identifiers |
 | `persona` | built-in profiles, TOML serialization, validation |
 | `adapters` | protocol-agnostic planners for transfer/stake/swap/memo intents |
 | `agent-runtime` | agent scheduler, hardening, account rotation, funding models, durability, optional RPC execution |

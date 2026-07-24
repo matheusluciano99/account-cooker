@@ -9,7 +9,6 @@
 //! shielded pool. See the workspace README threat model.
 
 pub mod decoy;
-pub mod keys;
 pub mod split;
 pub mod timing;
 pub mod types;

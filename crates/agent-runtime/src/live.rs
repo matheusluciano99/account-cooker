@@ -9,7 +9,6 @@
 //! RPC only unless explicitly overridden, hard debit/top-up limits, a freshly funded
 //! fee-payer, and idempotent retries of the exact same signed transaction.
 
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -28,8 +27,6 @@ use solana_stake_interface::instruction as stake_ix;
 use solana_stake_interface::state::{Authorized, Lockup};
 use solana_system_interface::instruction as system_instruction;
 use url::{Host, Url};
-
-use noise_core::types::AccountId;
 
 /// SPL Memo program (v2). A memo transaction is an ordinary instruction to this program whose
 /// data is the UTF-8 note; no value moves and no account is written.
@@ -118,36 +115,6 @@ pub fn is_loopback_rpc(url: &str) -> bool {
         Some(Host::Ipv4(ip)) => ip.is_loopback(),
         Some(Host::Ipv6(ip)) => ip.is_loopback(),
         None => false,
-    }
-}
-
-/// Maps a simulator `AccountId` (a pubkey) to the `Keypair` that controls it, so the
-/// orchestrator can keep operating on `AccountId`s while the live layer signs for real.
-#[derive(Default)]
-pub struct KeyStore {
-    keys: HashMap<AccountId, Keypair>,
-}
-
-impl KeyStore {
-    /// Register a keypair and return the `AccountId` (its pubkey) the rest of the system uses.
-    pub fn insert(&mut self, kp: Keypair) -> AccountId {
-        let id = AccountId(kp.pubkey().to_bytes());
-        self.keys.insert(id, kp);
-        id
-    }
-
-    /// Generate, register, and return a fresh throwaway account (e.g. a one-time fee-payer).
-    pub fn fresh(&mut self) -> AccountId {
-        self.insert(Keypair::new())
-    }
-
-    pub fn get(&self, id: &AccountId) -> Option<&Keypair> {
-        self.keys.get(id)
-    }
-
-    /// The on-chain pubkey for an `AccountId`, no secret required.
-    pub fn pubkey(id: &AccountId) -> Pubkey {
-        Pubkey::new_from_array(id.0)
     }
 }
 
@@ -278,23 +245,6 @@ impl RpcChain {
                 .map(|error| format!("; last send error: {error}"))
                 .unwrap_or_default()
         )))
-    }
-
-    /// Submit and confirm a transfer. `fee_payer` must be funded on-chain.
-    ///
-    /// This low-level method assumes the caller has already funded `fee_payer`. The safer
-    /// public CLI proof uses `run_live_transfer`, which quotes the fee, applies spend limits,
-    /// funds a fresh payer, and retries immutable signed bytes.
-    pub fn send_transfer(
-        &self,
-        from: &Keypair,
-        to: &Pubkey,
-        lamports: u64,
-        fee_payer: &Keypair,
-    ) -> Result<Signature, DynErr> {
-        let bh = self.latest_blockhash()?;
-        let tx = build_transfer(from, to, lamports, fee_payer, bh);
-        Ok(self.client.send_and_confirm_transaction(&tx)?)
     }
 }
 
@@ -683,14 +633,6 @@ pub fn run_live_transfer(cfg: &LiveTransferConfig) -> Result<LiveTransferReceipt
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn keystore_roundtrips_pubkey() {
-        let mut ks = KeyStore::default();
-        let id = ks.fresh();
-        let kp = ks.get(&id).unwrap();
-        assert_eq!(KeyStore::pubkey(&id), kp.pubkey());
-    }
 
     #[test]
     fn transfer_is_signed_and_addressed() {
