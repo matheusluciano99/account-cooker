@@ -146,13 +146,15 @@ impl Default for AdversaryConfig {
 }
 
 impl AdversaryConfig {
-    /// Adds destination-local Δt episodes to the exact-timestamp signals. Co-activity stays
-    /// restricted to exact timestamps; applying it to broad windows would merge unrelated
-    /// operators. The higher co-payment repetition bar bounds shared-destination collisions.
+    /// Groups by destination-local Δt episodes. Dest-agnostic co-activity is disabled: at fleet
+    /// scale many unrelated operators act in the same second, so co-activity unions across them
+    /// and precision collapses into one giant cluster. Dest-keyed co-payment (with the higher
+    /// repetition bar) is the precision-clean signal that survives scale.
     pub fn windowed(window_secs: i64) -> Self {
         AdversaryConfig {
             use_windowed: true,
             window_secs,
+            use_burst_coactivity: false,
             copay_min_shared_buckets: 3,
             ..AdversaryConfig::default()
         }

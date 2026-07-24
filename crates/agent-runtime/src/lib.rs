@@ -743,8 +743,12 @@ mod tests {
         (naive, hardened, legacy)
     }
 
-    /// Naive and legacy Curupira stay fully de-anonymized under both adversaries; hardened
-    /// Curupira drops to a low, nonzero F1 at high precision against the windowed adversary.
+    /// The honest arms race is worst-case over adversaries: naive AND legacy are each fully
+    /// de-anonymized by *some* adversary (naive by fee-payer linkage everywhere; legacy by
+    /// same-timestamp co-activity under the exact-ts adversary). Only hardened Curupira resists
+    /// both, leaving a low, high-precision residual. Dest-agnostic co-activity is disabled in
+    /// the windowed adversary because it over-merges at fleet scale, so legacy — whose only tell
+    /// is that co-activity — reads low under `windowed`; its worst case is the exact-ts number.
     #[test]
     fn honest_arms_race_after_hardening() {
         let (naive, hardened, legacy) = arms_race_ledgers();
@@ -753,7 +757,6 @@ mod tests {
 
         let (_, n_win) = analyze(&naive, &win);
         let (_, h_win) = analyze(&hardened, &win);
-        let (_, l_win) = analyze(&legacy, &win);
         let (_, n_exact) = analyze(&naive, &exact);
         let (_, h_exact) = analyze(&hardened, &exact);
         let (_, l_exact) = analyze(&legacy, &exact);
@@ -770,21 +773,16 @@ mod tests {
             n_win.attribution_f1
         );
 
-        // The windowed adversary still fully de-anonymizes legacy Curupira at high precision.
-        assert!(
-            l_win.attribution_f1 > 0.9,
-            "legacy windowed f1 {}",
-            l_win.attribution_f1
-        );
-        assert!(
-            l_win.attribution_precision > 0.9,
-            "legacy windowed prec {}",
-            l_win.attribution_precision
-        );
+        // Legacy's worst case: the exact-ts adversary fully de-anonymizes its same-ts fan-out.
         assert!(
             l_exact.attribution_f1 > 0.9,
             "legacy exact f1 {}",
             l_exact.attribution_f1
+        );
+        assert!(
+            l_exact.attribution_precision > 0.9,
+            "legacy exact prec {}",
+            l_exact.attribution_precision
         );
 
         // Exact-ts collapses on hardened Curupira (no same-ts fan-out to key on).
@@ -980,105 +978,170 @@ mod tests {
         }
     }
 
+    /// A streaming SHA-256 over the canonical bytes of every record — a compact fingerprint of
+    /// an entire ledger. Two runs of the same `(personas, cfg)` must produce the same hash.
+    fn trace_hash(ledger: &Ledger) -> [u8; 32] {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        for r in &ledger.records {
+            h.update(r.sig.to_le_bytes());
+            h.update(r.slot.to_le_bytes());
+            h.update(r.ts.to_le_bytes());
+            h.update(r.fee_payer.0);
+            h.update(r.source.0);
+            h.update(r.dest.0);
+            h.update(r.amount.to_le_bytes());
+            h.update([r.kind as u8]);
+            h.update(r.operator.unwrap_or(u32::MAX).to_le_bytes());
+        }
+        h.finalize().into()
+    }
+
     // Heavy; excluded from the default suite. Run with:
     //   cargo test -p agent-runtime --release -- --ignored scale
+    //
+    // 1000 agents x 30 days, hardened Curupira. Proves three things at scale: it produces
+    // millions of records fast; three independent runs of the same config yield a byte-identical
+    // trace-hash (determinism); and the arms-race invariants hold. To fit memory, only one large
+    // ledger is alive at a time — each is hashed (and the first one scored) then dropped.
     #[test]
     #[ignore]
-    fn scale_1000_agents_14_days() {
+    fn scale_1000_agents_30_days() {
         use std::time::Instant;
         let personas = Persona::presets();
         // External pool scales with the fleet so a fixed pool doesn't crowd copay buckets.
         let base = SimConfig {
             num_agents: 1000,
-            duration_secs: 14 * 86_400,
+            duration_secs: 30 * 86_400,
             num_external: 4000,
             ..SimConfig::default()
         };
-        let t0 = Instant::now();
-        let naive = simulate(
-            &personas,
-            &SimConfig {
-                mode: Mode::Naive,
-                ..base.clone()
-            },
-        );
-        let hardened = simulate(
-            &personas,
-            &SimConfig {
-                mode: Mode::Curupira,
-                harden_timing: true,
-                ..base.clone()
-            },
-        );
-        let hardened2 = simulate(
-            &personas,
-            &SimConfig {
-                mode: Mode::Curupira,
-                harden_timing: true,
-                ..base.clone()
-            },
-        );
-
-        assert!(
-            hardened.records.len() > 1_000_000,
-            "expected millions of records, got {}",
-            hardened.records.len()
-        );
-        assert_eq!(hardened.records.len(), hardened2.records.len());
-
         let win = AdversaryConfig::windowed(120);
-        let (_, n_win) = analyze(&naive, &win);
-        let (_, h_win) = analyze(&hardened, &win);
-        let (_, h2_win) = analyze(&hardened2, &win);
+        let t0 = Instant::now();
+
+        // Naive baseline, scored then dropped before any large hardened ledger exists.
+        let n_f1 = {
+            let naive = simulate(
+                &personas,
+                &SimConfig {
+                    mode: Mode::Naive,
+                    ..base.clone()
+                },
+            );
+            analyze(&naive, &win).1.attribution_f1
+        };
+
+        // Three hardened runs: hash each, score the first, drop before the next.
+        let hardened_cfg = SimConfig {
+            mode: Mode::Curupira,
+            harden_timing: true,
+            ..base.clone()
+        };
+        let mut hashes: Vec<[u8; 32]> = Vec::new();
+        let mut records = 0usize;
+        let mut h_report = None;
+        for run in 0..3 {
+            let ledger = simulate(&personas, &hardened_cfg);
+            records = ledger.records.len();
+            hashes.push(trace_hash(&ledger));
+            if run == 0 {
+                h_report = Some(analyze(&ledger, &win).1);
+            }
+        }
+        let h = h_report.unwrap();
         let elapsed = t0.elapsed();
         println!(
-            "scale: {} records, naive f1 {:.2}, hardened f1 {:.2}, {:?}",
-            hardened.records.len(),
-            n_win.attribution_f1,
-            h_win.attribution_f1,
-            elapsed
+            "scale: {records} records, naive f1 {:.2}, hardened f1 {:.2} (prec {:.2}), \
+             trace-hash {}, {elapsed:?}",
+            n_f1,
+            h.attribution_f1,
+            h.attribution_precision,
+            hex32(&hashes[0]),
         );
 
-        // Determinism at scale (bit-identical).
-        assert_eq!(
-            h_win.attribution_f1.to_bits(),
-            h2_win.attribution_f1.to_bits()
+        assert!(
+            records > 4_000_000,
+            "expected millions of records over 30 days, got {records}"
         );
-        assert_eq!(h_win.num_clusters, h2_win.num_clusters);
+        // Determinism at scale: all three runs are byte-identical.
+        assert_eq!(hashes[0], hashes[1], "run 1 != run 2 trace-hash");
+        assert_eq!(hashes[1], hashes[2], "run 2 != run 3 trace-hash");
 
         // Structural arms-race invariants (scale-invariant — NOT the 12-agent constants).
+        assert!(n_f1 > 0.9, "naive windowed f1 {n_f1}");
         assert!(
-            n_win.attribution_f1 > 0.9,
-            "naive windowed f1 {}",
-            n_win.attribution_f1
-        );
-        assert!(
-            h_win.attribution_f1 > 0.0,
+            h.attribution_f1 > 0.0,
             "hardened residual must be nonzero {}",
-            h_win.attribution_f1
+            h.attribution_f1
         );
         assert!(
-            h_win.attribution_f1 < n_win.attribution_f1 - 0.30,
-            "gap to naive too small: hardened {} vs naive {}",
-            h_win.attribution_f1,
-            n_win.attribution_f1
+            h.attribution_f1 < n_f1 - 0.30,
+            "gap to naive too small: hardened {} vs naive {n_f1}",
+            h.attribution_f1
         );
         assert!(
-            h_win.attribution_precision >= 0.80,
+            h.attribution_precision >= 0.80,
             "precision {}",
-            h_win.attribution_precision
+            h.attribution_precision
         );
         assert!(
-            h_win.largest_cluster_frac < 0.5,
+            h.largest_cluster_frac < 0.5,
             "lcf {}",
-            h_win.largest_cluster_frac
+            h.largest_cluster_frac
         );
 
         // Generous ceiling that fails if the run ever turns super-linear.
         assert!(
-            elapsed.as_secs() < 600,
-            "scale run took {:?} — possible O(n^2) regression",
-            elapsed
+            elapsed.as_secs() < 900,
+            "scale run took {elapsed:?} — possible O(n^2) regression"
+        );
+    }
+
+    fn hex32(bytes: &[u8; 32]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    // Why the windowed adversary disables dest-agnostic co-activity: at fleet scale many
+    // unrelated operators act in the same second, so co-activity unions across them into one
+    // giant cluster and the naive fleet's attribution collapses. This guards the fix — the
+    // scale-safe windowed config keeps naive at ~1.0; forcing co-activity on collapses it.
+    #[test]
+    #[ignore]
+    fn coactivity_over_merges_at_scale() {
+        let personas = Persona::presets();
+        let naive = simulate(
+            &personas,
+            &SimConfig {
+                num_agents: 500,
+                duration_secs: 30 * 86_400,
+                num_external: 2000,
+                mode: Mode::Naive,
+                ..SimConfig::default()
+            },
+        );
+        let safe = AdversaryConfig::windowed(120); // co-activity off
+        let with_coact = AdversaryConfig {
+            use_burst_coactivity: true,
+            ..safe.clone()
+        };
+        let (_, r_safe) = analyze(&naive, &safe);
+        let (_, r_coact) = analyze(&naive, &with_coact);
+        println!(
+            "naive @ 500x30d: scale-safe F1 {:.3} (prec {:.3}), co-activity-on F1 {:.3} (prec {:.3})",
+            r_safe.attribution_f1,
+            r_safe.attribution_precision,
+            r_coact.attribution_f1,
+            r_coact.attribution_precision
+        );
+        assert!(
+            r_safe.attribution_f1 > 0.9,
+            "scale-safe windowed must keep naive linkable, got {}",
+            r_safe.attribution_f1
+        );
+        assert!(
+            r_coact.attribution_f1 < 0.6,
+            "co-activity must visibly over-merge at scale, got {}",
+            r_coact.attribution_f1
         );
     }
 }

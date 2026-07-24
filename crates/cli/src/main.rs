@@ -665,9 +665,12 @@ fn benchmark(
         "{:<12}{:>10}{:>12}{:>10}",
         "seed", "naive F1", "curupira F1", "legacy F1"
     );
+    println!("  (worst-case attribution F1 over the exact-ts and windowed adversaries)");
     for offset in 0..seeds {
         let seed = seed_start.wrapping_add(offset as u64);
         let base = base_cfg(agents, days, seed, external)?;
+        // Worst-case over adversaries: linkability is the best any adversary achieves. Naive and
+        // legacy are each fully recovered by *some* adversary; only hardened resists both.
         let score = |mode, harden_timing| {
             let ledger = simulate(
                 &personas,
@@ -677,9 +680,13 @@ fn benchmark(
                     ..base.clone()
                 },
             );
-            analyze(&ledger, &AdversaryConfig::windowed(120))
+            let windowed = analyze(&ledger, &AdversaryConfig::windowed(120))
                 .1
-                .attribution_f1
+                .attribution_f1;
+            let exact = analyze(&ledger, &AdversaryConfig::exact_ts())
+                .1
+                .attribution_f1;
+            windowed.max(exact)
         };
         let naive = score(Mode::Naive, false);
         let hardened = score(Mode::Curupira, true);

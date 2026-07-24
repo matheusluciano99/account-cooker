@@ -232,13 +232,29 @@ who merely transact during the same interval.
 ## Scale and verification
 
 The runtime uses a `BinaryHeap` scheduler. Hot adversarial passes use indexed lookups and
-contingency-table scoring instead of all-pairs scans. Heavy ignored tests cover:
+contingency-table scoring instead of all-pairs scans. **1,000 agents over 30 simulated days
+produce 4,768,768 records in ~34 s**, and three independent runs of that configuration hash to
+a byte-identical trace-hash — determinism at millions of records:
 
-- 1,000 agents over 14 simulated days;
-- interrupted and resumed runs at several checkpoint boundaries;
-- a subprocess killed with `SIGKILL`, followed by byte-for-byte comparison.
+```text
+scale: 4768768 records, naive f1 1.00, hardened f1 0.12 (prec 1.00),
+       trace-hash 04b26a83…8efe2d46
+```
 
-Run them with:
+Naive is fully de-anonymized (F1 1.00) at any scale; hardened Curupira holds at F1 0.12 at
+precision 1.00 — the same residual as the 12-agent demo, with no giant-cluster collapse.
+
+Reaching a trustworthy number at scale meant fixing our own adversary: dest-agnostic
+co-activity links accounts that act in the same second, and at fleet scale unrelated operators
+collide every second, so it over-merges into one giant cluster and even *naive* attribution
+collapses to F1 0.03. The scale-safe (windowed) adversary disables co-activity and keeps only
+precision-clean dest-keyed signals; the exact-ts adversary keeps it for the small-scale
+straw-man. This is why reported F1 is the **worst case over both adversaries** — the best any
+one achieves.
+
+Heavy ignored tests cover the scale/determinism run above, interrupted-and-resumed runs at
+several checkpoints, a `SIGKILL`ed subprocess compared byte-for-byte, and the co-activity
+scale-collapse guard. Run them with:
 
 ```bash
 cargo test --workspace --release -- --ignored
@@ -261,8 +277,8 @@ transactions confidential.
 - Cover traffic costs fees and capital movement. `curupira cost` reports explicit
   assumptions; no default fee is presented as universal.
 - Real protocol integrations need protocol-specific safety checks, slippage limits, account
-  validation, and local-validator evidence. Only the bounded SOL path currently makes an
-  on-chain execution claim.
+  validation, and validator evidence. SOL transfer, SPL memo, and native stake delegation make
+  devnet-proven on-chain claims; swap stays an offline planner (no devnet liquidity).
 - Every reported result is specific to its seed, fleet shape, duration, funding policy,
   and adversary configuration. Use `benchmark` and measure the intended deployment.
 

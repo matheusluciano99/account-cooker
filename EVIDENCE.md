@@ -57,6 +57,10 @@ cargo run --release --quiet --bin curupira -- \
   benchmark --agents 12 --days 3 --seed-start 1 --seeds 10
 ```
 
+F1 is **worst-case over adversaries** — the best any adversary achieves, i.e. `max` of the
+exact-ts and windowed scores. Naive is recovered by fee-payer linkage and legacy by
+same-timestamp co-activity (the exact-ts adversary); only hardened Curupira resists both.
+
 Raw F1:
 
 | seed | naive | Curupira | legacy |
@@ -148,25 +152,46 @@ All passed. Warnings are denied.
 cargo test --workspace --features live
 ```
 
-Result: **84 passed, 0 failed, 2 ignored**. The two ignored tests are the expensive scale
-and subprocess crash-recovery proofs below.
+Result: **91 passed, 0 failed, 3 ignored**. The ignored tests are the expensive proofs run
+below: the 1000-agent scale/determinism run, the subprocess crash-recovery run, and the
+co-activity scale-collapse guard.
 
-### Scale
+### Scale and determinism (1000 agents × 30 days)
 
 ```bash
 cargo test -p agent-runtime --release \
-  scale_1000_agents_14_days -- --ignored --nocapture
+  scale_1000_agents_30_days -- --ignored --nocapture
 ```
 
 Result:
 
 ```text
-scale: 2250843 records, naive f1 0.93, hardened f1 0.17, 31.237833811s
-test tests::scale_1000_agents_14_days ... ok
+scale: 4768768 records, naive f1 1.00, hardened f1 0.12 (prec 1.00),
+       trace-hash 04b26a83e77495ba36facce4fb687ca319f73afef66d2e2cd0b157998efe2d46, 34.0s
+test tests::scale_1000_agents_30_days ... ok
 ```
 
-The elapsed value covers two identical hardened simulations, one naive simulation, and
-their adversarial analyses; the duplicate hardened run checks determinism.
+One naive simulation plus **three independent hardened simulations**; the test hashes every
+record of each hardened run and asserts all three `trace-hash`es are byte-identical
+(determinism at scale), scoring the first with the windowed adversary. 4.77 M records in ~34 s.
+
+Naive is fully de-anonymized (F1 1.00) by fee-payer linkage at any scale; hardened Curupira
+holds at F1 0.12, **precision 1.00** — the same consolidation/rotation-lineage residual as the
+12-agent demo, no giant-cluster collapse.
+
+**Honesty finding — co-activity is a scale trap.** Reaching this required fixing our own
+adversary. Dest-agnostic co-activity (H-COACT) links accounts that act in the same second; at
+fleet scale unrelated operators collide in the same second constantly, so it unions across them
+into one giant cluster and *naive* attribution collapses to F1 0.03 at precision 0.29. The
+windowed (scale-safe) adversary therefore disables co-activity and relies on precision-clean
+dest-keyed signals; the exact-ts adversary keeps it for the small-scale straw-man. Guarded by
+the `coactivity_over_merges_at_scale` test.
+
+```bash
+cargo test -p agent-runtime --release \
+  coactivity_over_merges_at_scale -- --ignored --nocapture
+# naive @ 500x30d: scale-safe F1 1.000 (prec 1.000), co-activity-on F1 0.449 (prec 0.289)
+```
 
 ### Real process termination and resume
 
@@ -287,7 +312,7 @@ is impossible — the swap adapter stays an offline intent planner) and SPL toke
 ## Regression caught during verification
 
 An initial chronology fix anchored each agent's next wake to the global observable clock.
-The scale test rejected it because a 1,000-agent run fell to 207,667 records. The runtime
-now keeps a per-agent logical schedule while monotonically clamping only emitted chain
-timestamps. A fast `aggregate_activity_scales_with_the_fleet` regression test was added,
-and the heavy proof returned to 2,250,843 records.
+The scale test rejected it because a 1,000-agent run collapsed to a fraction of its records.
+The runtime now keeps a per-agent logical schedule while monotonically clamping only emitted
+chain timestamps. A fast `aggregate_activity_scales_with_the_fleet` regression test was added,
+and the heavy proof again produced millions of records (see Scale above).
