@@ -6,12 +6,11 @@
 //! the common-funder graph and re-links the whole fleet, undoing fee-payer rotation. This
 //! module models that funding so O Caçador can measure the leak instead of ignoring it.
 //!
-//! It runs as a PURE POST-PASS over a completed base ledger: it never touches the action RNG
-//! stream, so a run with `funding: None` is byte-identical to the pre-funding engine, and a
-//! funded run is the untouched base ledger plus an appended, deterministically-seeded funding
-//! suffix. Funding records carry `kind = Transfer` — indistinguishable on-chain from any other
-//! SOL transfer — so the adversary must *infer* which transfers are funding, exactly as it must
-//! infer consolidation sweeps.
+//! It runs as a PURE POST-PASS over a completed base ledger, on its own seeded RNG stream that
+//! never touches the action stream: with `funding: None` the ledger is returned unchanged, and
+//! a funded ledger is the base ledger plus an appended, deterministic funding suffix. Funding
+//! records carry `kind = Transfer` — indistinguishable on-chain from any other SOL transfer — so
+//! the adversary must *infer* which transfers are funding, as it must infer consolidation sweeps.
 
 use crate::{Mode, SimConfig};
 use chacha20::ChaCha12Rng;
@@ -118,7 +117,7 @@ pub(crate) fn apply_funding(
     for r in &ledger.records {
         let fp = r.fee_payer;
         if source_set.contains(&fp) {
-            continue; // not a throwaway (never happens in Curupira; belt-and-suspenders)
+            continue; // an account that also signs as a source is not a throwaway fee-payer
         }
         if !funded.insert(fp) {
             continue; // already funded at an earlier use

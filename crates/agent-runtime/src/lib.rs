@@ -114,9 +114,9 @@ pub struct HardeningConfig {
     /// aggregate action rate stays near the per-agent rate (bounds volume and keeps
     /// coincidental cross-operator co-activity low).
     pub hold_aggregate_rate: bool,
-    /// How periodic balance maintenance is represented. Rotating each selected account into
-    /// a fresh successor avoids the permanent many-to-one hub that graph analysis trivially
-    /// clusters. `DirectHub` is retained as an explicit leaky ablation.
+    /// How periodic balance maintenance moves value. `RotateAccounts` sends each selected
+    /// account to a fresh successor, so no account becomes a shared hub for graph analysis to
+    /// cluster on; `DirectHub` funnels into one hub and is the leaky ablation.
     #[serde(default)]
     pub rebalance: RebalanceStrategy,
 }
@@ -512,9 +512,8 @@ fn perform_action_hardened(
 }
 
 /// Move selected subaccounts one-to-one into fresh successor accounts, then make those
-/// successors the active accounts for future wakes. This keeps capital mobile without a
-/// permanent many-to-one hub. The predecessor edge is still public; the Hunter can evolve
-/// activation/lineage heuristics against it, but it no longer gets a privileged hub for free.
+/// successors the active accounts for future wakes. This keeps capital mobile without funneling
+/// it into a shared hub; the predecessor->successor edge stays public for lineage analysis.
 fn rotate_accounts(
     chain: &mut MockChain,
     agent: &mut Agent,
@@ -1075,7 +1074,7 @@ mod tests {
             h_win.largest_cluster_frac
         );
 
-        // Generous guard against a regression back to super-linear behavior.
+        // Generous ceiling that fails if the run ever turns super-linear.
         assert!(
             elapsed.as_secs() < 600,
             "scale run took {:?} — possible O(n^2) regression",

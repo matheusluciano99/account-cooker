@@ -89,8 +89,8 @@ pub struct AdversaryConfig {
     /// Drop any group with more distinct sources than this. Must exceed the largest honest
     /// subaccount count (whale = 8) so no genuine group is ever dropped.
     pub burst_max_sources: usize,
-    /// Ignore co-payments below this observable amount. Zero means no amount filter.
-    /// This deliberately replaces semantic `Dust` labels, which do not exist on-chain.
+    /// Ignore co-payments below this observable amount (0 = no filter). Keyed on value, the
+    /// only thing on-chain — there is no semantic `Dust` label to read.
     pub copay_min_amount: u64,
     /// Ablation only: union every source in a group with no repetition threshold.
     pub use_burst_union_ceiling: bool,
@@ -615,7 +615,7 @@ mod tests {
         assert_ne!(uf.find(a), uf.find(c));
     }
 
-    // ---- v2 burst-heuristic tests (pure, deterministic, no RNG) ----
+    // ---- burst-heuristic tests (pure, deterministic, no RNG) ----
 
     fn acc(n: u8) -> AccountId {
         AccountId([n; 32])
@@ -650,7 +650,7 @@ mod tests {
         Ledger { records }
     }
 
-    /// A config with all legacy heuristics off, so a test isolates one v2 signal.
+    /// A config with all other heuristics off, so a test isolates one burst signal.
     fn only(copay: bool, coact: bool, ceiling: bool) -> AdversaryConfig {
         AdversaryConfig {
             use_fee_payer: false,
@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(g.len(), 2, "a slot gap breaks the run even at equal ts");
     }
 
-    // ---- v3 windowed-adversary tests ----
+    // ---- windowed-adversary tests ----
 
     /// Windowed variant of `only()`: exact-ts config + windowing on.
     fn win_only(copay: bool, coact: bool, window: i64) -> AdversaryConfig {
@@ -1206,7 +1206,7 @@ mod tests {
         }
     }
 
-    // ---- v4 funder-graph tests ----
+    // ---- funder-graph tests ----
 
     /// A record with an explicit fee_payer (funding txs set fee_payer == source == funder).
     fn recf(

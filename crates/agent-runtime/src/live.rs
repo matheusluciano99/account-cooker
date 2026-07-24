@@ -173,10 +173,9 @@ pub struct RpcChain {
 }
 
 impl RpcChain {
-    /// e.g. `RpcChain::new("https://api.devnet.solana.com")`. Uses `confirmed` commitment: it
-    /// is the right basis for blockhashes and preflight when submitting (the default
-    /// `finalized` lags ~32 slots, which stales blockhashes and can make preflight simulate
-    /// against a bank that has not yet observed a just-funded account).
+    /// e.g. `RpcChain::new("https://api.devnet.solana.com")`. Submits at `confirmed`
+    /// commitment, the right basis for blockhashes and preflight; `finalized` sits ~32 slots
+    /// back, too stale to submit against.
     pub fn new(url: impl Into<String>) -> Self {
         RpcChain {
             client: solana_client::rpc_client::RpcClient::new_with_commitment(
@@ -194,8 +193,7 @@ impl RpcChain {
         Ok(self.client.get_fee_for_message(&tx.message)?)
     }
 
-    /// Minimum balance a `data_len`-byte account must hold to be rent-exempt. A fee-payer left
-    /// below this (and non-zero) makes its funding transaction fail `InsufficientFundsForRent`.
+    /// Minimum balance a `data_len`-byte account must hold to be rent-exempt.
     fn min_rent_exempt(&self, data_len: usize) -> Result<u64, DynErr> {
         Ok(self
             .client
@@ -280,8 +278,8 @@ pub fn run_live_transfer(cfg: &LiveTransferConfig) -> Result<LiveTransferReceipt
     let quote_hash = chain.latest_blockhash()?;
     let quoted_action = build_transfer(&source, &destination, cfg.lamports, &fee_payer, quote_hash);
     let action_fee = chain.fee_for(&quoted_action)?;
-    // The fee-payer must retain the rent-exempt minimum after paying the action fee, or the
-    // funding transaction that creates it fails `InsufficientFundsForRent`. Top it up with both.
+    // Fund the fee-payer with the rent-exempt minimum plus the action fee, so it stays
+    // rent-exempt both when created and after it pays for the transfer.
     let rent_exempt_min = chain.min_rent_exempt(0)?;
     let fee_payer_topup = action_fee
         .checked_add(rent_exempt_min)
