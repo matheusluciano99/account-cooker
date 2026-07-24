@@ -7,10 +7,12 @@
 
 pub mod heuristics;
 pub mod metric;
+pub mod ml;
 pub mod model;
 
 pub use heuristics::{cluster, AdversaryConfig, Clustering};
 pub use metric::{evaluate, Report};
+pub use ml::{ml_attribution, MlConfig, MlReport};
 pub use model::{AgentId, Ledger, TxRecord};
 
 /// Convenience: cluster a ledger and score it in one call. The report's `window_purity` is

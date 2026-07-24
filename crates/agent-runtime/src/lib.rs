@@ -705,6 +705,42 @@ mod tests {
         assert!(!a.records.is_empty());
     }
 
+    /// The learned (ML) adversary re-identifies the naive fleet near-perfectly (ROC AUC ~1.0)
+    /// and is driven well down on hardened Curupira — the honest closed loop against a trained
+    /// classifier, not just hand-written heuristics.
+    #[test]
+    fn ml_adversary_degraded_by_hardening() {
+        use hunter::{ml_attribution, MlConfig};
+        let personas = Persona::presets();
+        let base = SimConfig::default(); // 12 agents => 12 operators, enough for CV folds
+        let cfg = MlConfig::default();
+        let naive = simulate(
+            &personas,
+            &SimConfig {
+                mode: Mode::Naive,
+                ..base.clone()
+            },
+        );
+        let hardened = simulate(&personas, &base);
+        let (_, n) = ml_attribution(&naive, &cfg);
+        let (_, h) = ml_attribution(&hardened, &cfg);
+        assert!(
+            n.roc_auc_defined && h.roc_auc_defined,
+            "AUC must be defined at 12 operators"
+        );
+        assert!(
+            n.roc_auc > 0.9,
+            "learned adversary should crush naive, got {}",
+            n.roc_auc
+        );
+        assert!(
+            h.roc_auc < n.roc_auc - 0.2,
+            "hardening should degrade the learned adversary: naive {} vs hardened {}",
+            n.roc_auc,
+            h.roc_auc
+        );
+    }
+
     fn arms_race_ledgers() -> (Ledger, Ledger, Ledger) {
         let personas = Persona::presets();
         let base = SimConfig::default();

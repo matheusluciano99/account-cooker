@@ -14,7 +14,7 @@ use clap::{Args, Parser, Subcommand};
 use agent_runtime::durable::{resume_durable, simulate_durable, DurabilityOpts};
 use agent_runtime::{simulate, FundingConfig, FundingPolicy, Mode, RebalanceStrategy, SimConfig};
 use hunter::model::Ledger;
-use hunter::{analyze, AdversaryConfig, Report};
+use hunter::{analyze, ml_attribution, AdversaryConfig, MlConfig, Report};
 use persona::Persona;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -608,8 +608,85 @@ fn demo(
     ablation(&hardened);
     rebalance_section(&personas, &base);
     funding_section(&personas, &base, agents);
+    ml_section(&naive, &hardened, &legacy);
     println!();
     Ok(())
+}
+
+/// O Caçador v5: a learned logistic adversary scored with operator-disjoint cross-validation.
+/// Reports held-out ROC AUC (the metric a modern chain-analysis firm reports) alongside the same
+/// pairwise F1/precision the heuristic rows use.
+fn ml_section(naive: &Ledger, hardened: &Ledger, legacy: &Ledger) {
+    let cfg = MlConfig::default();
+    println!();
+    println!("  -- adversary: learned logistic model (leave-operators-out CV, held-out) --");
+    println!(
+        "  {:<24}{:>10}{:>10}{:>10}",
+        "", "NAIVE", "CURUPIRA", "LEGACY"
+    );
+    let reports: Vec<_> = [naive, hardened, legacy]
+        .iter()
+        .map(|l| ml_attribution(l, &cfg).1)
+        .collect();
+    let cell = |v: f64, defined: bool| {
+        if defined {
+            format!("{v:.2}")
+        } else {
+            "n/a".to_string()
+        }
+    };
+    println!(
+        "  {:<24}{:>10}{:>10}{:>10}",
+        "ROC AUC (down)",
+        cell(reports[0].roc_auc, reports[0].roc_auc_defined),
+        cell(reports[1].roc_auc, reports[1].roc_auc_defined),
+        cell(reports[2].roc_auc, reports[2].roc_auc_defined),
+    );
+    row3(
+        "attribution F1 (down)",
+        reports[0].report.attribution_f1,
+        reports[1].report.attribution_f1,
+        reports[2].report.attribution_f1,
+        Fmt::F2,
+    );
+    row3(
+        "precision (up=honest)",
+        reports[0].report.attribution_precision,
+        reports[1].report.attribution_precision,
+        reports[2].report.attribution_precision,
+        Fmt::F2,
+    );
+    // Honesty check: did fusing features beat the best single rule on hardened Curupira?
+    let h = &reports[1];
+    let best_single = h
+        .single_feature_aucs
+        .iter()
+        .filter(|(_, a)| a.is_finite())
+        .fold((("", f64::NAN), f64::NEG_INFINITY), |acc, &(n, a)| {
+            if a > acc.1 {
+                ((n, a), a)
+            } else {
+                acc
+            }
+        });
+    println!(
+        "  Reading: a trained logistic model re-identifies naive at AUC {:.2} (it relearns the",
+        reports[0].roc_auc
+    );
+    println!("  fee-payer rule), but is driven down on hardened Curupira. On hardened the fused");
+    if h.roc_auc_defined {
+        println!(
+            "  model reaches AUC {:.2} vs the best single feature ({}) at AUC {:.2} — learned",
+            h.roc_auc,
+            (best_single.0).0,
+            (best_single.0).1
+        );
+        println!(
+            "  fusion of weak graph residuals, honestly measured and re-measured after hardening."
+        );
+    } else {
+        println!("  model is undefined at this fleet size (too few operators/positive pairs).");
+    }
 }
 
 fn rebalance_section(personas: &[Persona], base: &SimConfig) {

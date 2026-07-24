@@ -23,11 +23,12 @@ loop:
   cost estimation, append-only journals, atomic checkpoints, exact crash recovery, and
   million-record scale tests.
 - **Privacy measurement:** O Caçador attacks fee-payer reuse, graph consolidation,
-  activation lineage, peel chains, co-payment/co-activity timing, and fee-payer funding.
-  It reads only observable transaction fields; ownership labels are confined to scoring.
-- **Safe live path:** the optional Solana path quotes or executes a real SOL transfer with
-  a freshly funded fee-payer, bounded spend, local-RPC default, and idempotent retries of
-  one immutable signed transaction.
+  activation lineage, peel chains, co-payment/co-activity timing, and fee-payer funding — plus
+  a trained logistic-regression classifier (held-out ROC AUC) for the modern-clustering bar.
+  It reads only observable transaction fields; ownership labels are confined to scoring/training.
+- **Safe live path:** the optional Solana path quotes or executes real SOL transfer, SPL memo,
+  and native stake delegation with a freshly funded rotated fee-payer, bounded spend, local-RPC
+  default, and idempotent retries of one immutable signed transaction.
 
 The core thesis is deliberately modest: privacy-through-noise can raise attribution cost,
 but it is neither encryption nor a mixer. The harness exists to expose where it fails.
@@ -228,6 +229,38 @@ time). Action intent such as `Dust` or `Consolidate` is not used to create clust
 Temporal windows are destination-local proximity episodes, avoiding arbitrary global
 bucket boundaries. Broad co-activity is not unioned because it would merge unrelated users
 who merely transact during the same interval.
+
+## The learned adversary (a trained classifier, not just heuristics)
+
+To measure against *modern* clustering — not only hand-written rules — O Caçador also ships a
+learned adversary: a hand-rolled logistic-regression classifier over observable pairwise
+features (fee-payer/destination overlap, co-burst, windowed co-payment, common-funder,
+activation-lineage, peel-chain, timespan). It predicts P(two accounts share an operator) and is
+scored by threshold-free **ROC AUC** — the metric a modern chain-analysis firm reports.
+
+```
+  -- adversary: learned logistic model (leave-operators-out CV, held-out) --
+                               NAIVE  CURUPIRA    LEGACY
+  ROC AUC (down)                1.00      0.63      1.00
+  attribution F1 (down)         1.00      0.21      1.00
+```
+
+It re-identifies naive and legacy fleets at **AUC 1.00**, and is driven to **AUC 0.63** on
+hardened Curupira — barely above the 0.5 coin-flip. The fused model (0.63) edges out its best
+single feature (0.59), so the small residual is genuine learned fusion, not one rule in
+disguise. Honesty guarantees, all test-guarded:
+
+- **No label leakage:** features never read `operator`; it is used only as the training label
+  and for **operator-disjoint** cross-validation — every pair is scored by a model that trained
+  on neither of its two operators.
+- **Deterministic:** zero-initialised full-batch gradient descent, no RNG; probabilities are
+  quantised before the union threshold. Bit-reproducible within a toolchain.
+- **Genuinely bounded:** the report prints each single-feature AUC next to the fused AUC, so
+  "the model beat any one rule" is measured, not claimed.
+
+The headline: even a trained classifier only reaches AUC ≈ 0.63 on hardened Curupira, and unlike
+comparable ML adversaries we then **close the loop** (re-measure after hardening) and **model the
+funding graph**. Any external AUC figure is indicative, not a like-for-like comparison.
 
 ## Scale and verification
 

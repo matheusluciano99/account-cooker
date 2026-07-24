@@ -108,6 +108,30 @@ The operator-hub and dedicated-funder cases are deliberate negative results: fun
 re-links the fleet completely. The shared-relayer result has lower precision because the
 heuristic over-merges different operators; it must not be read as a 0.76 privacy guarantee.
 
+## Learned adversary (machine learning)
+
+The `demo` also runs a trained logistic-regression classifier (leave-operators-out
+cross-validation, held-out ROC AUC) — the modern-clustering bar, not just heuristics:
+
+```text
+  -- adversary: learned logistic model (leave-operators-out CV, held-out) --
+                               NAIVE  CURUPIRA    LEGACY
+  ROC AUC (down)                1.00      0.63      1.00
+  attribution F1 (down)         1.00      0.21      1.00
+  precision (up=honest)         1.00      0.12      1.00
+```
+
+Naive and legacy are re-identified at AUC 1.00; hardened Curupira is driven to AUC 0.63
+(barely above the 0.5 coin-flip). On hardened the fused model (0.63) beats its best single
+feature, `dest_jaccard` (0.59) — genuine learned fusion of weak residuals, not one rule in
+disguise. The low thresholded precision on hardened (0.12) is honest: with only a weak
+ranking signal, a fixed 0.5 threshold over-links; the threshold-free AUC is the fair metric.
+Honesty properties (all test-guarded in `crates/hunter/src/ml.rs`): features never read
+`operator` (proved by `features_never_read_operator`); it is used only as label + for
+operator-disjoint folds, so a held-out pair is scored by a model blind to both its operators;
+zero RNG (zero-init full-batch gradient descent), bit-reproducible within a toolchain. The
+`ml_adversary_degraded_by_hardening` integration test guards naive-AUC ≫ hardened-AUC.
+
 ## Cost example
 
 Command:
@@ -152,7 +176,7 @@ All passed. Warnings are denied.
 cargo test --workspace --features live
 ```
 
-Result: **91 passed, 0 failed, 3 ignored**. The ignored tests are the expensive proofs run
+Result: **93 passed, 0 failed, 3 ignored**. The ignored tests are the expensive proofs run
 below: the 1000-agent scale/determinism run, the subprocess crash-recovery run, and the
 co-activity scale-collapse guard.
 
