@@ -1,7 +1,7 @@
 //! The fleet orchestrator.
 //!
 //! By default this runs an **offline, deterministic** simulation: it emits a `Ledger`
-//! that the `hunter` crate can analyze, with zero network and full reproducibility
+//! that the `adversary` crate can analyze, with zero network and full reproducibility
 //! from a seed. That is what powers the reproducible before/after demo.
 //!
 //! Under the `live` feature it drives real accounts against a Solana RPC (see the
@@ -9,8 +9,8 @@
 //! decoys — is identical in both worlds; only the `Chain` sink differs.
 
 use adapters::{adapter_for, ActionContext, PlannedTx};
+use adversary::model::{AgentId, Ledger, TxRecord};
 use chacha20::ChaCha12Rng;
-use hunter::model::{AgentId, Ledger, TxRecord};
 use noise_core::types::{AccountId, ActionKind};
 use persona::Persona;
 use rand::{RngExt, SeedableRng};
@@ -693,7 +693,7 @@ pub fn run_comparison(personas: &[Persona], base: &SimConfig) -> (Ledger, Ledger
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hunter::{analyze, AdversaryConfig};
+    use adversary::{analyze, AdversaryConfig};
 
     #[test]
     fn simulation_is_deterministic() {
@@ -710,7 +710,7 @@ mod tests {
     /// classifier, not just hand-written heuristics.
     #[test]
     fn ml_adversary_degraded_by_hardening() {
-        use hunter::{ml_attribution, MlConfig};
+        use adversary::{ml_attribution, MlConfig};
         let personas = Persona::presets();
         let base = SimConfig::default(); // 12 agents => 12 operators, enough for CV folds
         let cfg = MlConfig::default();

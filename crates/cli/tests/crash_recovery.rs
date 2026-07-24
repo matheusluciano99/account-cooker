@@ -20,7 +20,7 @@ fn common() -> Vec<&'static str> {
     vec![
         "run",
         "--mode",
-        "account-cooker",
+        "cooker",
         "--agents",
         "300",
         "--days",

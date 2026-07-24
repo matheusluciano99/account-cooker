@@ -1,9 +1,9 @@
 [package]
-name = "hunter"
+name = "adversary"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "the adversary — adversarial chain-analysis harness that MEASURES how linkable a ledger is."
+description = "Adversarial chain-analysis harness for measuring ledger linkability."
 
 [dependencies]
 noise-core.workspace = true

@@ -16,10 +16,10 @@ dependencies = [
 name = "account-cooker-cli"
 version = "0.1.0"
 dependencies = [
+ "adversary",
  "agent-runtime",
  "anyhow",
  "clap",
- "hunter",
  "noise-core",
  "persona",
  "serde_json",
@@ -38,6 +38,15 @@ name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
+name = "adversary"
+version = "0.1.0"
+dependencies = [
+ "noise-core",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "aead"
@@ -142,8 +151,8 @@ name = "agent-runtime"
 version = "0.1.0"
 dependencies = [
  "adapters",
+ "adversary",
  "chacha20",
- "hunter",
  "noise-core",
  "persona",
  "rand 0.10.2",
@@ -1676,15 +1685,6 @@ name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
-
-[[package]]
-name = "hunter"
-version = "0.1.0"
-dependencies = [
- "noise-core",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "hybrid-array"

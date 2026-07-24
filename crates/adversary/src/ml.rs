@@ -1,4 +1,4 @@
-//! the adversary v5 — a learned (machine-learning) adversary.
+//! Learned adversary v5.
 //!
 //! The heuristic adversary in `heuristics.rs` unions accounts with hand-written rules. This
 //! module instead *learns* to link accounts: a logistic-regression classifier over observable

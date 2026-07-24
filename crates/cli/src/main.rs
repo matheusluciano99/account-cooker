@@ -11,10 +11,10 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
+use adversary::model::Ledger;
+use adversary::{analyze, ml_attribution, AdversaryConfig, MlConfig, Report};
 use agent_runtime::durable::{resume_durable, simulate_durable, DurabilityOpts};
 use agent_runtime::{simulate, FundingConfig, FundingPolicy, Mode, RebalanceStrategy, SimConfig};
-use hunter::model::Ledger;
-use hunter::{analyze, ml_attribution, AdversaryConfig, MlConfig, Report};
 use persona::Persona;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -613,7 +613,7 @@ fn demo(
     Ok(())
 }
 
-/// the adversary v5: a learned logistic adversary scored with operator-disjoint cross-validation.
+/// Learned logistic adversary scored with operator-disjoint cross-validation.
 /// Reports held-out ROC AUC (the metric a modern chain-analysis firm reports) alongside the same
 /// pairwise F1/precision the heuristic rows use.
 fn ml_section(naive: &Ledger, hardened: &Ledger, legacy: &Ledger) {

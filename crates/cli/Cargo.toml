@@ -15,7 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 agent-runtime.workspace = true
-hunter.workspace = true
+adversary.workspace = true
 persona.workspace = true
 noise-core.workspace = true
 clap.workspace = true

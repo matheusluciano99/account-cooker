@@ -13,8 +13,8 @@
 //! the adversary must *infer* which transfers are funding, as it must infer consolidation sweeps.
 
 use crate::{Mode, SimConfig};
+use adversary::model::{AgentId, Ledger, TxRecord};
 use chacha20::ChaCha12Rng;
-use hunter::model::{AgentId, Ledger, TxRecord};
 use noise_core::types::{AccountId, ActionKind};
 use rand::{RngExt, SeedableRng};
 use std::collections::{BTreeMap, HashSet};

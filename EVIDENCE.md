@@ -126,7 +126,7 @@ Naive and legacy are re-identified at AUC 1.00; hardened account-cooker is drive
 feature, `dest_jaccard` (0.59) — genuine learned fusion of weak residuals, not one rule in
 disguise. The low thresholded precision on hardened (0.12) is honest: with only a weak
 ranking signal, a fixed 0.5 threshold over-links; the threshold-free AUC is the fair metric.
-Honesty properties (all test-guarded in `crates/hunter/src/ml.rs`): features never read
+Honesty properties (all test-guarded in `crates/adversary/src/ml.rs`): features never read
 `operator` (proved by `features_never_read_operator`); it is used only as label + for
 operator-disjoint folds, so a held-out pair is scored by a model blind to both its operators;
 zero RNG (zero-init full-batch gradient descent), bit-reproducible within a toolchain. The

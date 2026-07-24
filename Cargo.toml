@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/noise-core",
     "crates/persona",
-    "crates/hunter",
+    "crates/adversary",
     "crates/adapters",
     "crates/agent-runtime",
     "crates/cli",
@@ -30,7 +30,7 @@ anyhow = "1"
 # internal crates
 noise-core = { path = "crates/noise-core" }
 persona = { path = "crates/persona" }
-hunter = { path = "crates/hunter" }
+adversary = { path = "crates/adversary" }
 adapters = { path = "crates/adapters" }
 agent-runtime = { path = "crates/agent-runtime" }
 

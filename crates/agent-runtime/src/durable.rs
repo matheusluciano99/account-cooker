@@ -14,8 +14,8 @@
 //! ```
 
 use crate::{build_fresh, run_core, DurSink, RunState, SimConfig};
+use adversary::model::{Ledger, TxRecord};
 use chacha20::ChaCha12Rng;
-use hunter::model::{Ledger, TxRecord};
 use noise_core::types::AccountId;
 use persona::Persona;
 use serde::{Deserialize, Serialize};

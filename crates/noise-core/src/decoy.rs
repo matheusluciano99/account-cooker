@@ -7,7 +7,7 @@
 //! Honest limitation: decoys are statistically weak against ML classifiers if they are
 //! distinguishable from real actions. They only help when decoys are drawn from the
 //! SAME distribution as real activity — which is why decoys reuse the persona's own
-//! action/amount models. The `hunter` crate measures whether this actually works.
+//! action/amount models. The `adversary` crate measures whether this actually works.
 
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};

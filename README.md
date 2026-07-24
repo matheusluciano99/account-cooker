@@ -1,4 +1,4 @@
-# account-cooker 🦶🔄
+# account-cooker
 
 **Believable Solana activity at scale, paired with an adversarial harness that measures
 how linkable the resulting accounts remain.**
@@ -7,9 +7,8 @@ how linkable the resulting accounts remain.**
 > [`account-cooker`](https://superteam.fun/earn/listing/noise) bounty. Rust, end-to-end,
 > MIT licensed.
 
-_account-cooker_ is the Brazilian folklore creature whose feet point backwards and confuse
-trackers. The name fits the goal, but the project does not rely on folklore-grade claims:
-every privacy result is scored by **the adversary**, the adversary shipped in this repository.
+account-cooker manufactures believable autonomous Solana activity to make behavioral
+attribution harder. Every privacy result is scored by the adversary shipped in this repository.
 
 ## Why this submission is different
 
@@ -201,7 +200,7 @@ intent-only (no chain deps, for offline testability); the real instruction seam 
 | `persona` | built-in profiles, TOML serialization, validation |
 | `adapters` | protocol-agnostic planners for transfer/stake/swap/memo intents |
 | `agent-runtime` | agent scheduler, hardening, account rotation, funding models, durability, optional RPC execution |
-| `hunter` | observable-only clustering heuristics and ground-truth-only metrics |
+| `adversary` | observable-only clustering heuristics and ground-truth-only metrics |
 | `account-cooker-cli` | demo, benchmark, dump, durable run, report, cost, personas, live proof |
 
 The simulator and adversary are isolated from the RPC layer. That makes every behavioral

@@ -20,7 +20,7 @@ live = [
 [dependencies]
 noise-core.workspace = true
 persona.workspace = true
-hunter.workspace = true
+adversary.workspace = true
 adapters.workspace = true
 rand.workspace = true
 serde.workspace = true
