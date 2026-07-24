@@ -213,6 +213,56 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         execute: bool,
     },
+    /// Quote or execute a real SPL Memo transaction, fee paid by a freshly funded fee-payer.
+    #[cfg(feature = "live")]
+    LiveMemo {
+        #[arg(long, default_value = "http://127.0.0.1:8899")]
+        rpc_url: String,
+        #[arg(long)]
+        payer: PathBuf,
+        /// The memo text to write on-chain.
+        #[arg(long)]
+        memo: String,
+        #[arg(long, default_value_t = 5_000_000)]
+        max_total_debit: u64,
+        #[arg(long, default_value_t = 2_000_000)]
+        max_fee_payer_topup: u64,
+        #[arg(long, default_value_t = 20)]
+        status_polls: u32,
+        #[arg(long, default_value_t = false)]
+        allow_remote_rpc: bool,
+        #[arg(long, default_value_t = false)]
+        execute: bool,
+    },
+    /// Quote or execute a real native stake: create a stake account and delegate it to a vote
+    /// account, fee paid by a freshly funded fee-payer.
+    #[cfg(feature = "live")]
+    LiveStake {
+        #[arg(long, default_value = "http://127.0.0.1:8899")]
+        rpc_url: String,
+        #[arg(long)]
+        payer: PathBuf,
+        /// Vote account to delegate to. If omitted, the highest-stake current vote account on
+        /// the cluster is chosen at runtime.
+        #[arg(long)]
+        vote: Option<String>,
+        /// Lamports to fund the stake account: its rent-exempt minimum (~0.0023 SOL) plus the
+        /// delegated amount. The delegation must meet the cluster minimum (1 SOL on devnet/
+        /// mainnet), so the default funds rent + ~1 SOL.
+        #[arg(long, default_value_t = 1_100_000_000)]
+        lamports: u64,
+        /// Stake moves real value (rent + delegation), so the total-debit ceiling is higher.
+        #[arg(long, default_value_t = 1_300_000_000)]
+        max_total_debit: u64,
+        #[arg(long, default_value_t = 2_000_000)]
+        max_fee_payer_topup: u64,
+        #[arg(long, default_value_t = 30)]
+        status_polls: u32,
+        #[arg(long, default_value_t = false)]
+        allow_remote_rpc: bool,
+        #[arg(long, default_value_t = false)]
+        execute: bool,
+    },
     /// Write the built-in personas to TOML files so they can be customized.
     Personas {
         #[arg(long, default_value = "personas")]
@@ -306,6 +356,48 @@ fn main() -> Result<()> {
             rpc_url,
             payer,
             destination,
+            lamports,
+            max_total_debit,
+            max_fee_payer_topup,
+            status_polls,
+            allow_remote_rpc,
+            execute,
+        ),
+        #[cfg(feature = "live")]
+        Cmd::LiveMemo {
+            rpc_url,
+            payer,
+            memo,
+            max_total_debit,
+            max_fee_payer_topup,
+            status_polls,
+            allow_remote_rpc,
+            execute,
+        } => live_action(
+            rpc_url,
+            payer,
+            agent_runtime::live::LiveAction::Memo { text: memo },
+            max_total_debit,
+            max_fee_payer_topup,
+            status_polls,
+            allow_remote_rpc,
+            execute,
+        ),
+        #[cfg(feature = "live")]
+        Cmd::LiveStake {
+            rpc_url,
+            payer,
+            vote,
+            lamports,
+            max_total_debit,
+            max_fee_payer_topup,
+            status_polls,
+            allow_remote_rpc,
+            execute,
+        } => live_stake(
+            rpc_url,
+            payer,
+            vote,
             lamports,
             max_total_debit,
             max_fee_payer_topup,
@@ -904,6 +996,61 @@ fn live_transfer(
         .map_err(|error| anyhow::anyhow!("{error}"))?;
     println!("{}", serde_json::to_string_pretty(&receipt)?);
     Ok(())
+}
+
+#[cfg(feature = "live")]
+#[allow(clippy::too_many_arguments)]
+fn live_action(
+    rpc_url: String,
+    payer: PathBuf,
+    action: agent_runtime::live::LiveAction,
+    max_total_debit: u64,
+    max_fee_payer_topup: u64,
+    status_polls: u32,
+    allow_remote_rpc: bool,
+    execute: bool,
+) -> Result<()> {
+    let receipt = agent_runtime::live::run_live_action(&agent_runtime::live::LiveActionConfig {
+        rpc_url,
+        payer_path: payer,
+        action,
+        max_total_debit,
+        max_fee_payer_topup,
+        status_polls,
+        allow_remote_rpc,
+        execute,
+    })
+    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    println!("{}", serde_json::to_string_pretty(&receipt)?);
+    Ok(())
+}
+
+/// Resolve the vote account (given, or the cluster's highest-stake current one) and delegate.
+#[cfg(feature = "live")]
+#[allow(clippy::too_many_arguments)]
+fn live_stake(
+    rpc_url: String,
+    payer: PathBuf,
+    vote: Option<String>,
+    lamports: u64,
+    max_total_debit: u64,
+    max_fee_payer_topup: u64,
+    status_polls: u32,
+    allow_remote_rpc: bool,
+    execute: bool,
+) -> Result<()> {
+    let action = agent_runtime::live::stake_action(&rpc_url, vote, lamports)
+        .map_err(|error| anyhow::anyhow!("{error}"))?;
+    live_action(
+        rpc_url,
+        payer,
+        action,
+        max_total_debit,
+        max_fee_payer_topup,
+        status_polls,
+        allow_remote_rpc,
+        execute,
+    )
 }
 
 #[cfg(test)]

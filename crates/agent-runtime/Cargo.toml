@@ -13,6 +13,7 @@ live = [
     "dep:solana-client",
     "dep:solana-system-interface",
     "dep:solana-commitment-config",
+    "dep:solana-stake-interface",
     "dep:url",
 ]
 
@@ -33,4 +34,6 @@ solana-sdk = { version = "4", optional = true }
 solana-client = { version = "4", optional = true }
 solana-system-interface = { version = "3", optional = true }
 solana-commitment-config = { version = "3", optional = true }
+# `bincode` feature is mandatory: the stake instruction constructors are gated behind it.
+solana-stake-interface = { version = "3", features = ["bincode"], optional = true }
 url = { version = "2", optional = true }

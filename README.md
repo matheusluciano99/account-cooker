@@ -159,12 +159,14 @@ Live dependencies are opt-in:
 
 ```bash
 cargo build --workspace --features live
-cargo run --features live --bin curupira -- live-transfer --help
+cargo run --features live --bin curupira -- live-transfer --help   # also: live-memo, live-stake
 ```
 
-The command is quote-only unless `--execute` is present and rejects remote RPC endpoints
-unless they are explicitly allowed. It requires explicit total-debit and fee-payer-top-up
-ceilings. A local validator proof is automated:
+Every live command shares one fail-closed envelope: quote-only unless `--execute`, remote RPC
+rejected unless explicitly allowed, explicit total-debit and fee-payer-top-up ceilings, a
+freshly funded **rotated** ephemeral fee-payer (rent-exempt-minimum + fee, so the funder itself
+never signs the action), and idempotent submission of one immutable transaction. A local
+validator proof is automated:
 
 ```bash
 # Start solana-test-validator or Surfpool on 127.0.0.1:8899 first
@@ -175,15 +177,20 @@ The script creates temporary keys, airdrops only on the selected local endpoint,
 one transfer, checks both signatures, verifies the destination balance, and removes the
 temporary directory. The library never airdrops and never defaults to devnet/mainnet.
 
-The same command runs against public **devnet** with `--rpc-url https://api.devnet.solana.com
---allow-remote-rpc`; a proven run and its two finalized signatures are recorded in
-[`EVIDENCE.md`](EVIDENCE.md).
+**Three real actions are proven on public devnet** (`--rpc-url https://api.devnet.solana.com
+--allow-remote-rpc`), each with finalized signatures recorded in [`EVIDENCE.md`](EVIDENCE.md):
 
-Current live scope is intentionally precise: **native SOL transfer and rotated fee-payer
-funding are implemented as real Solana transactions, proven on localnet and devnet;
-stake/swap/memo adapters are still deterministic intent planners.** They must not be
-described as production protocol integrations until corresponding instruction builders and
-validator tests land.
+- **`live-transfer`** — a native SOL transfer.
+- **`live-memo`** — a real SPL Memo instruction (verified in the transaction logs).
+- **`live-stake`** — creates a stake account and delegates it to a live vote account (the tool
+  auto-picks one), staying rent-exempt and above the cluster's minimum delegation.
+
+Current live scope is intentionally precise: **SOL transfer, rotated fee-payer funding, SPL
+memo, and native stake delegation are real Solana transactions proven on localnet and devnet;
+swap stays a deterministic intent planner** — Jupiter has no devnet liquidity, so a real devnet
+swap is impossible and we do not fake one. The offline `ProtocolAdapter` trait is intentionally
+intent-only (no chain deps, for offline testability); the real instruction seam lives in
+`agent-runtime/src/live.rs`.
 
 ## Architecture
 

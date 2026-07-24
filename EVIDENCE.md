@@ -242,6 +242,48 @@ any successful on-chain execution:
   that has not observed a just-funded account (localnet: `no record of a prior credit`).
   Submission now uses `confirmed`.
 
+### Real protocol actions: memo and native stake
+
+The same fail-closed envelope executes more than a transfer. Both proven on public devnet:
+
+**SPL Memo** (`live-memo`, program `MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr`):
+
+| role | signature | status |
+|---|---|---|
+| ephemeral fee-payer funding | `4zPdR2BNciC9Mgc65MCB4MYyyyi8uHuV3pPtPijDALc5Q2t2j1mzK7x2Xh2FB99P1Py3zJd2xDZWket5wTkiogVK` | Finalized |
+| memo | `5hzwMAjQiT682yyGA2cxM9RxPVMbisFABwm8DydUxMcNYFZrPBbkqvx8TtQizFnh8qkx5S2o8e1VeRMH6SdgGfCc` | Finalized |
+
+`solana confirm -v` on the memo tx shows `Program log: Memo (len 24): "curupira-live-proof-8f3a"`.
+
+**Native stake** (`live-stake`, create stake account + delegate to a live vote account):
+
+| role | signature | status |
+|---|---|---|
+| ephemeral fee-payer funding | `641SHdKaaVPp7VfimFbx6AkVfSAFxpSLUrgQK4XeZus32GhgYJALRQgz5yvj5TFPS6AvUzVAiChDcrh6UbW7DRZ4` | Finalized |
+| create + delegate | `BzcDYyGJdPGQcF93bVbLTNJEHZioVnF5KpyUU99RYNsRnYkH38B6ZAzFYDBGGXYcvzbKehwNcS9GSrt6tNPuN6P` | Finalized |
+
+Stake account `EPCVzQXUhKBgyMzSgScpeaD54skHKPJZNUpN3DVV7GwY`, delegated to vote account
+`vgcDar2pryHvMgPkKaZfh8pQy4BJxv7SpwUG7zinWjG`, balance `1.1 SOL` (rent `0.00228288` +
+delegation `1.09771712`). `solana stake-account` shows it `Activating` with stake/withdraw
+authority = the source, NOT the ephemeral fee-payer — fee-payer rotation is preserved even
+for staking. **Honest caveat:** delegation is recorded on-chain immediately; full activation
+happens at the next epoch boundary, so this proves *created + delegated*, not *active*.
+
+Two more defects surfaced and fixed while proving stake:
+
+- delegating below the cluster minimum failed on-chain with an opaque `custom program error:
+  0xc` (`InsufficientDelegation`) — devnet requires a 1 SOL minimum delegation while a bare
+  validator requires 1 lamport. The runtime now queries `get_stake_minimum_delegation()` and
+  fails closed with a clear message before submitting.
+- `send_idempotent` sent the transaction only a few times, so a congested public RPC dropped
+  the larger stake transaction before a leader picked it up. It now re-sends the same immutable
+  bytes every ~2s until the blockhash expires — still idempotent (one signature), just
+  resilient to a dropping RPC.
+
+**Not attempted, honestly:** a real swap (Jupiter has no devnet liquidity, so a devnet swap
+is impossible — the swap adapter stays an offline intent planner) and SPL token flows (the
+`spl-token` crate pins an incompatible `solana-pubkey` major against solana-sdk 4).
+
 ## Regression caught during verification
 
 An initial chronology fix anchored each agent's next wake to the global observable clock.
